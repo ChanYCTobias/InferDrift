@@ -22,7 +22,7 @@ PRICE = "10,30"
 def test_python_m_entry_point(tmp_path):
     p = run_cli(["--version"], tmp_path)
     assert p.returncode == 0 and p.stdout.strip() == f"inferdrift {__version__}"
-    assert __version__ == "0.1.0.dev0"
+    assert __version__ == "0.2.0.dev0"
 
 
 def test_plan_option_is_marked_experimental(capsys):

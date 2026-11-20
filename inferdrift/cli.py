@@ -3,8 +3,10 @@
 """Command line: ``inferdrift <command>``.
 
 Exit codes: 0 run completed (the verdict is in the report; with ``--exit-on-verdict``
-0 means EQUIVALENT_WITHIN_TAU, 10 DEVIATES, 11 INCONCLUSIVE), 3 refused before any
-work started, 4 error.
+0 means EQUIVALENT_WITHIN_TAU, 10 DEVIATES, 11 INCONCLUSIVE, 12
+INCONCLUSIVE_UNDERPOWERED), 3 refused (before any work started, or during a run
+when its integrity cannot be kept: a missing second run, a corrupt reference
+cache), 4 error.
 
 Every numeric option is read with a strict grammar and checked against its closed
 domain before anything is sent or written: caps and durations are
@@ -40,7 +42,7 @@ from .meter import Caps, PriceCard
 from .redact import scrub_text
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR = 0, 3, 4
-VERDICT_EXIT = {"EQUIVALENT_WITHIN_TAU": 0, "DEVIATES": 10, "INCONCLUSIVE": 11}
+VERDICT_EXIT = {"EQUIVALENT_WITHIN_TAU": 0, "DEVIATES": 10, "INCONCLUSIVE": 11, "INCONCLUSIVE_UNDERPOWERED": 12}
 
 
 class _ArgumentError(Exception):
@@ -130,6 +132,8 @@ def cmd_compare(a) -> int:
         if missing is not None:
             return missing
     bank_dir = None
+    if a.criterion is None:  # the experimental --plan path keeps the 0.1.0 rule unless a criterion is given
+        a.criterion = "harmful_abs" if plan is not None else "net_change"
     if plan is not None:
         # The certificate counts every selected item, so the run does not stop at the first DEVIATES look.
         a.no_early_stop = True
@@ -171,12 +175,20 @@ def _cmd_compare_body(a, plan) -> int:
         template_overhead_tokens=D.parse_integer(a.template_overhead_tokens, "--template-overhead-tokens", ge=0,
                                                  le=1 << 20),
         judge=a.judge, judge_api_key_env=D.env_name(a.judge_api_key_env, "--judge-api-key-env"),
-        judge_price=PriceCard.parse(a.judge_price, "--judge-price"), judge_cache=a.judge_cache)
+        judge_price=PriceCard.parse(a.judge_price, "--judge-price"), judge_cache=a.judge_cache,
+        criterion=a.criterion, power=D.parse_number(a.power, "--power", gt=0.0, lt=1.0),
+        floor_probe_items=D.parse_optional_integer(a.floor_probe_items, "--floor-probe-items", ge=0, le=1_000_000),
+        replicate=a.replicate, plan_floor=D.parse_optional_number(a.plan_floor, "--plan-floor", ge=0.0, le=1.0),
+        ref_cache=a.ref_cache, stop_if_underpowered=a.stop_if_underpowered)
     rep = run_compare(cfg)
     v = rep["verdict"]
+    gates = v.get("gates") or {}
     line = {"status": rep["status"], "verdict": v["verdict"], "n": v["n"], "tau": v["tau"], "alpha": v["alpha"],
             "first_verdict_elapsed_s": rep["timing"]["first_verdict_elapsed_s"], "cost_usd": rep["cost"]["usd_total"],
-            "stopped_by": rep["cost"]["stopped_by"], "report": str(Path(a.out) / "report.json")}
+            "stopped_by": rep["cost"]["stopped_by"], "report": str(Path(a.out) / "report.json"),
+            "criterion": v.get("criterion"), "items_needed": v.get("items_needed"),
+            "floor": {"value": gates.get("floor"), "source": gates.get("floor_source")} if gates else None,
+            "pre_gate_deviation": v.get("pre_gate_deviation")}
     if plan is not None and rep["status"] == "completed":
         from .jsonio import read_jsonl_strict, write_json
         from .requalify import certify, grades_from_compare_records
@@ -299,6 +311,44 @@ def cmd_plan(a) -> int:
     return EXIT_OK
 
 
+def cmd_power(a) -> int:
+    """Items needed (and power) for the paired criteria: no stacks, no network."""
+    from . import power as pw
+
+    crit = a.criterion
+    tau = D.parse_number(a.tau, "--tau", gt=0.0, lt=1.0)
+    alpha = D.parse_number(a.alpha, "--alpha", gt=0.0, lt=1.0)
+    target = D.parse_number(a.power, "--power", gt=0.0, lt=1.0)
+    floor = D.parse_number(a.floor, "--floor", ge=0.0, le=1.0)
+    if crit == "net_change" and a.excess is not None:
+        raise BadInputError("--excess", "applies to --criterion harmful_excess (use --loss with net_change)")
+    if crit == "harmful_excess" and a.loss is not None:
+        raise BadInputError("--loss", "applies to --criterion net_change (use --excess with harmful_excess)")
+    effect_text = a.loss if crit == "net_change" else a.excess
+    effect = D.parse_number(effect_text, "--loss" if crit == "net_change" else "--excess", ge=-1.0, le=1.0) \
+        if effect_text is not None else 0.0
+    m = D.parse_integer(a.capability_count, "--capability-count", ge=1, le=64)
+    items = D.parse_optional_integer(a.items, "--items", ge=1, le=10 ** 7)
+    model = pw.model_for(crit, floor, effect)
+    weights = {f"capability_{i + 1}": 1 for i in range(m)}
+    models = {c: model for c in weights}
+    need = pw.items_needed(weights, models, alpha, tau, target)
+    out = {"criterion": crit, "tau": tau, "alpha": alpha, "power": target, "floor": floor,
+           ("loss" if crit == "net_change" else "excess"): effect, "capability_count": m, "model": model.to_dict(),
+           "items_needed": need["items_needed"], "items_needed_per_capability": need["per_capability"],
+           "items_needed_exceeds": need["exceeds"],
+           "method": "exact pass probability of the paired bound (the bound compare uses), product over equal "
+                     "capabilities; items_needed is a powered total whose one-smaller total is not (exact power is "
+                     "not monotone in n)"}
+    if items is not None:
+        counts = pw.allocate(items, weights)
+        out["items"] = items
+        out["power_at_items"] = pw.power_total(counts, models, alpha, tau)
+        out["smallest_tau_at_items"] = pw.smallest_tau(counts, models, alpha, target)
+    print(dumps_strict(out, indent=1))
+    return EXIT_OK
+
+
 def cmd_standin(a) -> int:
     from .standin import main_serve
 
@@ -308,6 +358,7 @@ def cmd_standin(a) -> int:
     a.truncate_frac = D.parse_optional_number(a.truncate_frac, "--truncate-frac", gt=0.0, le=1.0)
     a.nondeterministic = D.parse_number(a.nondeterministic, "--nondeterministic", ge=0.0, le=1.0)
     a.fail_every = D.parse_integer(a.fail_every, "--fail-every", ge=0, le=1 << 20)
+    a.noise_seed = D.parse_integer(a.noise_seed, "--noise-seed", ge=0, le=MAX_SEED)
     D.env_name(a.api_key_env, "--api-key-env")
     return main_serve(a)
 
@@ -364,8 +415,9 @@ def build_parser() -> argparse.ArgumentParser:
                    "from the recorded grades beside the plan. The file is data and is never executed.")
     c.add_argument("--bank", default="core", help="core | full | smoke | suite[,suite] | path/to/bank.jsonl")
     c.add_argument("--max-items", default=None, help="planned n_max, a positive integer (default: the whole bank)")
-    c.add_argument("--tau", default="0.01", help="equivalence margin on the harmful-flip rate, in (0, 1) "
-                   "(0.01 = 1 point)")
+    c.add_argument("--tau", default="0.01", help="tolerance in (0, 1) (0.01 = 1 point) on the criterion's statistic: "
+                   "the net accuracy loss per capability (net_change, the default), the excess harmful-flip rate "
+                   "over the noise floor (harmful_excess) or the harmful-flip rate (harmful_abs)")
     c.add_argument("--alpha", default="0.05", help="error rate, in (0, 1)")
     c.add_argument("--seed", default="0", help="non-negative integer")
     c.add_argument("--decode", choices=("greedy", "sample"), default="greedy")
@@ -401,7 +453,35 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--judge-price", default=None, help="USD per 1M tokens 'IN,OUT' for the judge endpoint")
     c.add_argument("--judge-cache", default=None, help="JSONL file of recorded judge verdicts (reused across runs)")
     c.add_argument("--exit-on-verdict", action="store_true")
+    c.add_argument("--criterion", choices=("net_change", "harmful_excess", "harmful_abs"), default=None,
+                   help="what the verdict certifies (default net_change; harmful_abs under --plan): net_change = "
+                   "net accuracy loss per capability against the noise floor; harmful_excess = excess harmful-flip "
+                   "rate over the reference's replicate floor; harmful_abs = the 0.1.0 rule, for deterministic stacks")
+    c.add_argument("--power", default="0.9", help="power the plan must have, in (0, 1); below it the verdict is "
+                   "INCONCLUSIVE_UNDERPOWERED with the number of items needed")
+    c.add_argument("--floor-probe-items", default=None, help="items run twice on both stacks to measure the noise "
+                   "floor (default 64; 0 turns the probe off)")
+    c.add_argument("--plan-floor", default=None, help="a floor in [0, 1] measured beforehand, used by the power gate "
+                   "unless this run measures a significantly higher one")
+    c.add_argument("--replicate", choices=("auto", "always"), default="auto",
+                   help="auto: run a stack twice on every item only when the floor needs it; always: both stacks")
+    c.add_argument("--ref-cache", default=None, help="directory of the reference cache (reuses reference outputs "
+                   "across candidates)")
+    c.add_argument("--stop-if-underpowered", action="store_true", help="stop after the probe when the plan is "
+                   "underpowered")
     c.set_defaults(fn=cmd_compare)
+
+    pw = sub.add_parser("power", help="items needed for a tolerance at a noise floor (no stacks, no network)")
+    pw.add_argument("--criterion", choices=("net_change", "harmful_excess"), default="net_change")
+    pw.add_argument("--tau", default="0.01", help="tolerance in (0, 1)")
+    pw.add_argument("--alpha", default="0.05", help="error rate in (0, 1)")
+    pw.add_argument("--power", default="0.9", help="power in (0, 1)")
+    pw.add_argument("--floor", default="0", help="answer-level repeat-flip rate in [0, 1]")
+    pw.add_argument("--loss", default=None, help="net_change: true net loss to plan for (default 0)")
+    pw.add_argument("--excess", default=None, help="harmful_excess: true excess harmful-flip rate (default 0)")
+    pw.add_argument("--capability-count", default="1", help="number of capabilities, equal shares (default 1)")
+    pw.add_argument("--items", default=None, help="also report the power at this many items and the smallest tau")
+    pw.set_defaults(fn=cmd_power)
 
     i = sub.add_parser("inspect", help="passive inspection of a model repository, file or endpoint")
     i.add_argument("target")
@@ -444,6 +524,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fault injection: report malformed token usage (the ledger stays truthful)")
     s.add_argument("--nondeterministic", default="0")
     s.add_argument("--fail-every", default="0")
+    s.add_argument("--noise-seed", default="0", help="seed of the replay noise model (lines with alt and flip); "
+                   "two stand-ins with the same noise seed are the same engine")
     s.add_argument("--work-dir", default=None)
     s.set_defaults(fn=cmd_standin)
 

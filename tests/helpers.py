@@ -358,3 +358,42 @@ def run_with_audit(root: Path, cli_args: list[str], cwd: Path, env_extra: dict) 
     if "__AUDIT__" in p.stdout:
         audit = json.loads(p.stdout.split("__AUDIT__", 1)[1].strip().splitlines()[0])
     return p, audit
+
+
+# ------------------------------------------------------------------ noisy and deterministic engine fixtures
+def make_single_suite_bank(n: int, suite: str = "t_one") -> list[dict]:
+    """``n`` numeric items in one suite (one capability), with known answers."""
+    return [{"id": f"s-{i:04d}", "suite": suite, "messages": [
+        {"role": "user", "content": f"What is {i} + {3 * i + 1}? Reply with only the number."}],
+        "tools": None, "template_kwargs": {}, "max_new_tokens": 16,
+        "grader": {"type": "numeric", "answer": 4 * i + 1, "tol": 0}} for i in range(n)]
+
+
+def write_noisy_replay(items: list[dict], path: Path, text_fn, alt_fn=None, flip_of=None) -> Path:
+    """Replay lines for the stand-in's noise model: ``text_fn(item)`` is served, except that an
+    item with ``flip_of(item) > 0`` serves ``alt_fn(item)`` with that probability per request."""
+    with open(path, "w", encoding="utf-8") as f:
+        for it in items:
+            line = {"key": request_key(messages=it["messages"], tools=it.get("tools")), "text": text_fn(it)}
+            p = flip_of(it) if flip_of else 0.0
+            if p:
+                line["alt"] = alt_fn(it)
+                line["flip"] = p
+            f.write(json.dumps(line) + "\n")
+    return path
+
+
+def pick(items: list[dict], share: float, seed: int, exclude: set | None = None) -> set:
+    """A seeded subset of item ids, ``share`` of all items, drawn outside ``exclude``."""
+    import random
+
+    pool = [it["id"] for it in items if it["id"] not in (exclude or set())]
+    return set(random.Random(seed).sample(pool, int(round(share * len(items)))))
+
+
+def report_of(out: Path) -> dict:
+    return json.loads((out / "report.json").read_text())
+
+
+def items_of(out: Path) -> list[dict]:
+    return [json.loads(x) for x in (out / "items.jsonl").read_text().splitlines() if x.strip()]

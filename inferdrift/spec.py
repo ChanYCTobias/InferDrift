@@ -5,7 +5,11 @@
     hf:<org/name>[@revision][?attn=sdpa&dtype=float32&threads=8&batch=16&quant=rtn-int4-g128&template=FILE]
     hf:/path/to/local/dir[?...]
     http(s)://host:port[/v1][?dialect=openai|llamacpp|vllm|sglang&mode=chat|raw&model=ID&tokenizer=hf:...
-                              &send_template_kwargs=1&cache_prompt=1]
+                              &send_template_kwargs=1&cache_prompt=1&deterministic=on|off]
+
+``deterministic=on|off`` records what you know about the engine's deterministic
+or batch-invariant mode (the report states it as declared, and flags a declared
+``on`` whose outputs are observed to differ between runs).
 
 API keys never appear in a spec; ``--ref-api-key-env`` / ``--cand-api-key-env``
 name the environment variable that holds one.
@@ -27,7 +31,7 @@ from .errors import BadInputError, SpecError
 
 HF_PARAMS = {"attn", "dtype", "threads", "batch", "quant", "template", "name", "max_batch_tokens"}
 EP_PARAMS = {"dialect", "mode", "model", "tokenizer", "name", "max_concurrency", "timeout_s", "cache_prompt",
-             "send_template_kwargs"}
+             "send_template_kwargs", "deterministic"}
 DIALECTS = ("auto", "openai", "llamacpp", "vllm", "sglang")
 DTYPES = ("float32", "bfloat16", "float16")
 ATTN = ("sdpa", "eager", "flash_attention_2", "flash_attention_3", "flex_attention")
@@ -60,6 +64,8 @@ def _params(query: str, allowed: set, kind: str) -> dict:
             domains.choice(v, field_name, ATTN)
         elif k in ("cache_prompt", "send_template_kwargs"):
             domains.choice(v, field_name, FLAGS)
+        elif k == "deterministic":
+            domains.choice(v, field_name, ("on", "off"))
         elif k == "quant":
             m = _QUANT.fullmatch(v)
             if not m or not 2 <= int(m.group(1)) <= 8 or not 1 <= int(m.group(2)) <= 65536:

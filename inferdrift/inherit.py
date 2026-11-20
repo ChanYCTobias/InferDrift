@@ -137,6 +137,23 @@ class GradeBook:
         self.calls["reference_calls" if how in ("fresh", "judge_call") else "reference_judge_cache_hits"] += 1
         return g
 
+    def grade_reference_cached(self, item: dict, output: str, cached: Grade) -> Grade:
+        """A reference grade inherited from the reference cache (made by the same grader).
+
+        Deterministic graders: a seeded share (``audit_fraction``) is graded again; a
+        mismatch is recorded and the fresh grade wins.  Judge verdicts are reused
+        as recorded (they are never re-requested for audit)."""
+        if item["grader"]["type"] != "judge" and self.audit_fraction > 0 and self.audit_selected(item["id"]):
+            g, _ = self._fresh(item, output)
+            self.calls["reference_cache_audit_calls"] += 1
+            if g != cached:
+                self.audit_mismatches.append({"item": item["id"], "side": "reference_cache",
+                                              "inherited": cached.to_dict(), "fresh": g.to_dict()})
+                return g
+            return cached
+        self.calls["reference_cache_inherited"] += 1
+        return cached
+
     def grade_follower(self, item: dict, ref_output: str, ref_grade: Grade, output: str,
                        side: str = "candidate") -> tuple[Grade, str, int]:
         """Grade a candidate (or replicate) output; return (grade, how, grading_calls_spent)."""

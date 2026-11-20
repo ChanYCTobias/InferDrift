@@ -17,18 +17,30 @@
 A shared seed sent to two endpoints is not shared randomness unless both run the
 same sampler implementation; it is reported as ``seed_shared_unverified`` and the
 independent-sampling bounds apply.
+
+Under the paired criteria (``net_change``, ``harmful_excess``) a stack whose
+greedy outputs are not repeatable is routed to the noise floor (the reference
+runs twice and the verdict is judged against that floor), and without verified
+shared randomness every run gets its own derived seed (see ``compare.run_indices``).
 """
 
 from __future__ import annotations
 
 
-def plan_coupling(decode, ref_adapter, cand_adapter, ref_ch: dict | None, cand_ch: dict | None) -> dict:
+def plan_coupling(decode, ref_adapter, cand_adapter, ref_ch: dict | None, cand_ch: dict | None,
+                  criterion: str = "harmful_abs") -> dict:
     flags = []
+    paired = criterion != "harmful_abs"
     for name, ch in (("reference", ref_ch), ("candidate", cand_ch)):
         rate = (ch or {}).get("greedy_repeat_identity_rate")
         if rate is not None and rate < 1.0:
-            flags.append(f"{name} is not deterministic under greedy decoding (repeat identity {rate:.2f}); "
-                         f"part of the observed churn is the stack's own nondeterminism")
+            if paired:
+                flags.append(f"{name} is not deterministic under greedy decoding (repeat identity {rate:.2f}); "
+                             f"routed to the noise floor: the reference runs twice and the verdict is judged "
+                             f"against that floor")
+            else:
+                flags.append(f"{name} is not deterministic under greedy decoding (repeat identity {rate:.2f}); "
+                             f"part of the observed churn is the stack's own nondeterminism")
     if decode.mode == "greedy":
         return {"mode": "greedy", "coupled": True, "independent_bounds": False,
                 "reason": "greedy decoding on both stacks", "flags": flags}
@@ -42,7 +54,7 @@ def plan_coupling(decode, ref_adapter, cand_adapter, ref_ch: dict | None, cand_c
         mode = "independent"
     else:
         flags.append("both endpoints honour seeds, but a shared seed only couples identical samplers; "
-                     "treated as independent sampling")
+                     "treated as independent sampling" + ("; every run gets its own derived seed" if paired else ""))
         mode = "seed_shared_unverified"
     return {"mode": mode, "coupled": False, "independent_bounds": True,
             "reason": "no verified shared randomness between the stacks", "flags": flags}

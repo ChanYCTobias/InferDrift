@@ -165,6 +165,10 @@ class HFAdapter(Adapter):
         f["output_caps"] = field_value({"per_item": "max_new_tokens from the bank"}, "runtime:inferdrift")
         f["prompt_rendering"] = field_value("transformers.apply_chat_template", "runtime:transformers")
         f["parameters_stored"] = field_value(self.n_params, "runtime:torch")
+        try:  # a read-only fact about this process; never changed by inferdrift
+            p["flags"]["deterministic_algorithms"] = bool(torch.are_deterministic_algorithms_enabled())
+        except Exception:  # pragma: no cover - very old torch
+            p["flags"]["deterministic_algorithms"] = None
         p["flags"]["quantized_layers"] = self.quantized_layers
         p["flags"]["passive"] = (self.passive or {}).get("flags")
         return finalize(p)

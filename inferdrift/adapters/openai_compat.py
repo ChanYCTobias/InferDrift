@@ -77,6 +77,8 @@ class OpenAICompatAdapter(Adapter):
             f["chat_template_sha256"] = unobservable("rendered by the server")
         f["hardware"] = unobservable("remote endpoint")
         f["decode_parameters"] = field_value("set per request by inferdrift", "declared:tool")
+        p["flags"]["declared_deterministic"] = self.spec.params.get("deterministic")
+        p["flags"]["max_concurrency"] = self.max_concurrency
         return finalize(p)
 
     # ---------------------------------------------------------------- requests

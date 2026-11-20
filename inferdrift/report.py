@@ -1,6 +1,12 @@
 # Copyright 2026 The InferDrift Authors
 # SPDX-License-Identifier: Apache-2.0
-"""JSON report and one-page summary."""
+"""JSON report (schema ``inferdrift/report/2``) and one-page summary.
+
+Every key of report/1 is kept.  Under ``--criterion harmful_abs`` the report/1
+keys keep their 0.1.0 meaning; the paired criteria change what ``verdict.statistic``
+and ``verdict.bound`` describe (the binding capability's paired bound), and add
+the sections ``criteria``, ``noise``, ``power``, ``deterministic_mode`` and
+``reference_cache``."""
 
 from __future__ import annotations
 
@@ -8,11 +14,11 @@ import statistics
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from . import __version__
+from . import __version__, criteria, determinism, noise
 from .jsonio import atomic_write_text
 from .redact import scrub
 
-SCHEMA = "inferdrift/report/1"
+SCHEMA = "inferdrift/report/2"
 BUCKETS = (("<=64", 64), ("<=256", 256))
 
 
@@ -57,9 +63,201 @@ def _truncation(records: list[dict]) -> dict:
             "silent_truncation_suspected": bool(suspected or len(inconsistent) >= 3)}
 
 
+def _paired_counts(records: list[dict], fn) -> criteria.Counts:
+    c = criteria.Counts()
+    for r in records:
+        v = fn(r)
+        if v is not None:
+            c.add(v)
+    return c
+
+
+def _residual_fns() -> dict:
+    """Residuals (+1 = the loss direction) of the paired quantities reported beside the verdict."""
+    def y(r, key):
+        return bool(r[key]["correct"])
+
+    def ok(r, side):
+        return noise.valid(r.get(side))
+
+    def need_rep(r):
+        return "rep" in r and ok(r, "rep") and ok(r, "ref")
+
+    return {
+        "excess_harmful_flip_rate": lambda r: (int(y(r, "ref_grade") and not y(r, "cand_grade")) -
+                                               int(y(r, "ref_grade") and not y(r, "rep_grade"))) if need_rep(r) else None,
+        "excess_helpful_flip_rate": lambda r: (int(not y(r, "ref_grade") and y(r, "cand_grade")) -
+                                               int(not y(r, "ref_grade") and y(r, "rep_grade"))) if need_rep(r) else None,
+        "excess_churn": lambda r: (int(y(r, "ref_grade") != y(r, "cand_grade")) -
+                                   int(y(r, "ref_grade") != y(r, "rep_grade"))) if need_rep(r) else None,
+        "replicate_net_change": lambda r: (int(y(r, "rep_grade")) - int(y(r, "ref_grade"))) if need_rep(r) else None,
+    }
+
+
+def _bound_of(c: criteria.Counts, alpha: float) -> dict:
+    return criteria.bound_dict(c, alpha)
+
+
+def _paired_sections(cfg, records, looks, extra, channels, coupling, profiles) -> tuple[dict, list[str]]:
+    """criteria, noise, power, deterministic_mode, per-suite and estimate additions of the paired criteria."""
+    px = extra["paired"]
+    alpha, tau = cfg.alpha, cfg.tau
+    lim: list[str] = []
+    gate = px.get("gate") or {}
+    caps = sorted({r["capability"] for r in records} | set((px.get("run_counts") or {}).keys()))
+    # net change and harmful excess, pooled and per capability
+    crit_out = {"gating": cfg.criterion, "nuisance_fraction": criteria.PHI, "method": criteria.METHOD}
+    for name, key in (("net_change", "residual_net"), ("harmful_excess", "residual_excess")):
+        evaluated = [r for r in records if r.get(key) is not None]
+        if name == "harmful_excess" and not evaluated:
+            crit_out[name] = {"available": False, "reason": "the reference's second run did not cover the items"}
+            continue
+        basis = "all evaluated items"
+        if name == "harmful_excess" and len(evaluated) < len(records):
+            basis = f"{len(evaluated)} of {len(records)} items (those with a valid reference second run)"
+        pooled = _paired_counts(evaluated, lambda r, k=key: r[k])
+        per = {}
+        for c in caps:
+            cc = _paired_counts([r for r in evaluated if r["capability"] == c], lambda r, k=key: r[k])
+            b = _bound_of(cc, alpha)
+            b["within_tau"] = bool(cc.n) and b["upper"] <= tau
+            per[c] = b
+        crit_out[name] = {"available": True, "secondary": name != cfg.criterion, "basis": basis,
+                          "theta": "acc(reference) - acc(candidate)" if name == "net_change" else
+                          "P(cross-stack harmful flip) - P(replicate harmful flip)",
+                          "pooled": _bound_of(pooled, alpha), "per_capability": per,
+                          "simultaneous_upper_alpha": alpha / max(1, len(caps)),
+                          "per_capability_simultaneous_upper": {c: criteria.upper(
+                              _paired_counts([r for r in evaluated if r["capability"] == c], lambda r, k=key: r[k]),
+                              alpha / max(1, len(caps))) for c in caps if any(r["capability"] == c for r in evaluated)}}
+    # noise floor
+    st = gate.get("stats") or {"reference": noise.pair_stats(records, "ref", "rep", "ref_grade", "rep_grade", alpha),
+                               "candidate": noise.pair_stats(records, "cand", "cand_rep", "cand_grade",
+                                                             "cand_rep_grade", alpha)}
+    fl = gate.get("floor")
+    batching = extra.get("adapters_batching") or {}
+    noise_out = {
+        "probe": {"items": px.get("probe_items"), "second_runs_in_reverse_order": True,
+                  "batch_composition_varied": batching,
+                  "protocol": "per chunk: the reference's first run, then the candidate's first run, in the seeded "
+                              "order; then each needed second run with its requests in reverse order. A second run "
+                              "is sent after both first runs, so it can differ from the first run in timing and, "
+                              "for an engine with a prefix or response cache, in cache state."},
+        "replicate_rule": px.get("rule"), "same_coupling_replicates": px.get("same_coupling"),
+        "per_stack": st, "routing": px.get("routing"), "noisy_on_probe": px.get("noisy"),
+        "noisy_on_channel_probe": px.get("channel_noisy"),
+        "floor": fl, "gate_floor": {"source": gate.get("floor_source"), "per_capability": gate.get("floors"),
+                                    "supplied": cfg.plan_floor,
+                                    "supplied_contradicted": gate.get("supplied_floor_contradicted")},
+        "errors_per_pass": px.get("pass_errors"),
+        "error_rule": "an errored output is retried once; a reference first run still in error leaves the item "
+                      "out of the residuals (and the run cannot pass); a candidate first run in error is graded as a "
+                      "wrong answer (a loss); an errored second run is left out of the floor and never counts as a "
+                      "repeat flip",
+    }
+    # estimates beside the verdict
+    est_add = {}
+    fns = _residual_fns()
+    rep_items = [r for r in records if "rep" in r]
+    rep_basis = "all items" if (px.get("routing") or {}).get("reference_every_item") else "probe items"
+    for name, fn in fns.items():
+        cnt = _paired_counts(records, fn)
+        if cnt.n == 0:
+            est_add[name] = None
+            continue
+        b = _bound_of(cnt, alpha)
+        if name == "replicate_net_change":  # two-sided check at alpha (each side at alpha/2)
+            b2 = {"lower": criteria.lower(cnt, alpha / 2), "upper": criteria.upper(cnt, alpha / 2)}
+            b["two_sided_alpha"] = alpha
+            b["two_sided"] = b2
+            # residual +1 here means the second run is right and the first wrong (the second run is better)
+            b["sign"] = "acc(reference second run) - acc(reference first run)"
+            if b2["lower"] > 0 or b2["upper"] < 0:
+                lim.append("the reference's second run differs systematically from its first (drift, or a cache in "
+                           "front of the engine); the floor may be wrong")
+        else:
+            b["sign"] = "+ is the loss direction (cross-stack minus replicate)"
+        b["basis"] = rep_basis
+        est_add[name] = b
+    net = _paired_counts([r for r in records if r.get("residual_net") is not None], lambda r: r["residual_net"])
+    est_add["net_change"] = dict(_bound_of(net, alpha), sign="net loss = acc(reference) - acc(candidate)")         if net.n else None
+    est_add["replicate_items"] = len(rep_items)
+    # power
+    need = gate.get("items_needed") or {}
+    power_out = {
+        "criterion": cfg.criterion, "tau": tau, "alpha": alpha, "power_requested": cfg.power,
+        "model": "net loss residuals with symmetric noise flips at the floor (p+ = p- = f/2), no real change"
+                 if cfg.criterion == "net_change" else
+                 "harmful_excess residuals with replicate harmful and helpful flips at f/2 each, no real excess",
+        "planned_items": None,
+        "power_at_planned": gate.get("power_at_planned"), "power_per_capability": gate.get("power_per_capability"),
+        "underpowered": gate.get("underpowered"), "floor_source": gate.get("floor_source"),
+        "floors": gate.get("floors"), "items_needed": need.get("items_needed"),
+        "items_needed_per_capability": need.get("per_capability"), "items_needed_exceeds": need.get("exceeds"),
+        "items_needed_lower_bound": need.get("lower_bound"), "short_capabilities": gate.get("short_capabilities"),
+        "smallest_tau_at_planned": gate.get("smallest_tau_at_planned"),
+        "method": "exact pass probability of the bound the verdict uses, summed over the discordant count "
+                  "(truncated at 1e-12 of mass); product over capabilities; items_needed is a powered total whose "
+                  "one-smaller total is not, with capabilities in the bank's proportions",
+        "assumptions": ["items are independent draws; capabilities are disjoint", "the floor is a point estimate "
+                        "from this run (or the supplied --plan-floor); per capability where a stack ran twice on "
+                        "every item", "the power of exact tests is not monotone in n: a smaller powered size may "
+                        "exist below a gap"],
+    }
+    # deterministic mode
+    det = {}
+    declared = extra.get("declared") or {}
+    for role, key in (("reference", "reference"), ("candidate", "candidate")):
+        s = st[role]
+        ch = (channels or {}).get(role) or {}
+        det[role] = determinism.section((profiles.get(role) or {}).get("kind"), declared.get(role) or {}, {
+            "items": s["items"], "byte_identical": s["byte_identical"], "answer_flips": s["answer_flips"],
+            "channel_repeat_identity": ch.get("greedy_repeat_identity_rate_without_errors"),
+            "batch_composition_varied": batching.get(role)})
+        if det[role]["declared_on_but_nondeterministic"]:
+            lim.append(f"the {role} declares a deterministic mode, but its outputs differed between runs")
+    # limitations of the paired run
+    if gate.get("underpowered"):
+        if gate.get("floor_source") == "unmeasured":
+            lim.append("the noise floor was not measured (no item was run twice): no pass or fail is issued; "
+                       "run the probe (--floor-probe-items) or pass --plan-floor")
+        else:
+            lim.append(f"the planned items have power {gate.get('power_at_planned'):.3f} < {cfg.power} for tau = "
+                       f"{tau} at the measured floor: the verdict is INCONCLUSIVE_UNDERPOWERED, never a pass or a "
+                       f"fail" + (f"; about {need['items_needed']} items would do" if need.get("items_needed") else ""))
+    if gate.get("supplied_floor_contradicted"):
+        lim.append("the supplied --plan-floor is below what this run measured; the gate used the measured floor")
+    if px.get("excluded"):
+        lim.append(f"{px['excluded']} item(s) had no valid output from the reference's run(s) after a retry and were "
+                   f"left out of the residuals; EQUIVALENT_WITHIN_TAU needs every planned item")
+    pe = px.get("pass_errors") or {}
+    if any(v.get("errored") for v in pe.values()):
+        lim.append("errored outputs per run (before and after one retry): " + ", ".join(
+            f"{k} {v['errored']}/{v['errored_after_retry']}" for k, v in pe.items() if v.get("errored")))
+    if px.get("stopped_underpowered"):
+        lim.append("stopped after the probe because the plan is underpowered (--stop-if-underpowered)")
+    if px.get("pre_gate_deviation") and not px["pre_gate_deviation"].get("allowed_by_power_gate"):
+        d = px["pre_gate_deviation"]
+        lim.append(f"evidence of a deviation that the power gate did not let become a verdict: at look {d['look']} "
+                   f"(n = {d['n']}) the lower bound exceeded tau for {', '.join(d['capabilities'])}")
+    if fl and fl.get("measured") and fl.get("value", 0) > 0 and st["candidate"]["items"] and st["reference"]["items"]:
+        rc = st["candidate"]["repeat_flip_rate"]
+        rr = st["reference"]["repeat_flip_rate"]
+        if rc["lower"] > (rr["point"] or 0.0):
+            lim.append("the candidate is noisier than the reference; under harmful_excess the candidate is charged "
+                       "for noise beyond the reference's floor")
+    if cfg.criterion == "harmful_excess" and (px.get("routing") or {}).get("candidate_every_item") is False and             px.get("noisy", {}).get("candidate"):
+        lim.append("harmful_excess subtracts the reference's floor only; a noisier candidate is charged for its "
+                   "own noise")
+    return {"criteria": crit_out, "noise": noise_out, "power": power_out, "deterministic_mode": det,
+            "estimates_add": est_add}, lim
+
+
 def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, first_verdict, profiles, profile_diff,
                  channels, coupling, meter, gradebook, prepared, skipped, bank_items, phases, started, elapsed,
-                 bank_digest_value) -> dict:
+                 bank_digest_value, extra=None) -> dict:
+    extra = extra or {}
+    paired = extra.get("paired") is not None
     n = len(records)
     h = sum(1 for r in records if r["flip"] < 0)
     g = sum(1 for r in records if r["flip"] > 0)
@@ -78,6 +276,9 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
         est["churn_rate"] = stats.rate_bound(h + g, n, alpha).to_dict()
         est["accuracy"] = {"reference": ref_ok / n, "candidate": cand_ok / n}
         est["accuracy_change"] = stats.accuracy_change(g, n - h - g, h, alpha).to_dict()
+    if paired:
+        est["accuracy_change_note"] = ("the 0.1.0 unpaired union-of-Clopper-Pearson bound, kept for compatibility; "
+                                       "the paired net change is estimates.net_change")
     per_suite = {}
     by_suite = defaultdict(list)
     for r in records:
@@ -91,6 +292,9 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
                         "candidate_accuracy": sum(r["cand_grade"]["correct"] for r in rs) / len(rs),
                         "harmful_rate_upper_descriptive": stats.rate_upper(sh, len(rs), alpha),
                         "note": "per-suite bounds are descriptive (not adjusted for multiplicity)"}
+        if paired:
+            cc = _paired_counts(rs, lambda r: r.get("residual_net"))
+            per_suite[s]["net_change"] = _bound_of(cc, alpha) if cc.n else None
     calls = dict(gradebook.calls)
     cand_calls = sum(r["cand_grading_calls"] for r in records)
     inheritance = {
@@ -135,6 +339,13 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
     if diagnostics["truncation"]["silent_truncation_suspected"]:
         limitations.append("candidate outputs look silently truncated (prefixes of the reference output ending "
                            "with a normal stop, or a 'length' finish below the cap)")
+    sections, lim2 = (_paired_sections(cfg, records, looks, extra, channels, coupling, profiles) if paired
+                      else (None, []))
+    if paired:
+        limitations += lim2
+    elif coupling and any("not deterministic under greedy decoding" in f for f in coupling.get("flags", [])):
+        limitations.append("harmful_abs counts a stack's own nondeterminism as harm; the default criterion "
+                           "(net_change) measures the noise floor and judges against it")
     cost = meter.snapshot()
     bad_usage = {k: v.get("invalid_usage_requests") for k, v in cost["per_stack"].items()
                  if v.get("invalid_usage_requests")}
@@ -158,11 +369,14 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
         "settings": cfg.to_dict(),
         "bank": {"spec": cfg.bank, "items_available": len(bank_items), "digest": bank_digest_value,
                  "suites": dict(Counter(it["suite"] for it in bank_items)), "skipped_suites": skipped},
-        "plan": plan.to_dict(),
-        "verdict": {"verdict": verdict, "tau": cfg.tau, "alpha": cfg.alpha,
-                    "statistic": ("excess_harmful_flip_rate" if coupling and coupling.get("independent_bounds")
+        "plan": plan.to_dict(cfg.criterion, len({it["suite"] for it in _planned(cfg, bank_items, plan)}))
+        if paired else plan.to_dict(),
+        "verdict": {"verdict": verdict, "tau": cfg.tau, "alpha": cfg.alpha, "criterion": cfg.criterion,
+                    "statistic": (criteria.STATISTIC[cfg.criterion] if paired else
+                                  "excess_harmful_flip_rate" if coupling and coupling.get("independent_bounds")
                                   else "harmful_flip_rate"),
-                    "bound": bound.to_dict() if bound else None, "n": n, "n_max": plan.n_max,
+                    "bound": (bound.to_dict() if hasattr(bound, "to_dict") else bound) if bound else None,
+                    "n": n, "n_max": plan.n_max,
                     "final_look_reached": bool(looks) and len(looks) == len(plan.looks) and n == plan.n_max,
                     "stopped_by": state.get("stopped_by"), "first_verdict": first_verdict},
         "looks": looks,
@@ -182,16 +396,164 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
                    "first_verdict_elapsed_s": (first_verdict or {}).get("elapsed_s")},
         "limitations": limitations,
     }
+    if paired:
+        px = extra["paired"]
+        gate = px.get("gate") or {}
+        need = gate.get("items_needed") or {}
+        fin = px.get("final") or {}
+        per = {}
+        for c, cc in sorted((px.get("run_counts") or {}).items()):
+            b = _bound_of(cc, cfg.alpha)
+            per[c] = {"planned": _planned_counts(cfg, bank_items, plan).get(c, 0), "evaluated": cc.n, "bad": cc.bad,
+                      "good": cc.good, "point": cc.point, "upper": b["upper"], "lower": b["lower"],
+                      "within_tau": bool(cc.n) and b["upper"] <= cfg.tau,
+                      "power_at_planned": (gate.get("power_per_capability") or {}).get(c)}
+        rep["verdict"].update({
+            "per_capability": per, "items_needed": need.get("items_needed") if gate.get("underpowered") else None,
+            "excluded_items": px.get("excluded", 0),
+            "pre_gate_deviation": px.get("pre_gate_deviation"),
+            "gates": {"underpowered": gate.get("underpowered"), "power_at_planned": gate.get("power_at_planned"),
+                      "power_requested": cfg.power, "floor_source": gate.get("floor_source"),
+                      "floor": (gate.get("floor") or {}).get("value"),
+                      "deviates_look": px.get("pre_gate_deviation"), "all_within_tau": fin.get("all_within"),
+                      "every_planned_item_evaluated": px.get("complete"),
+                      "stopped_after_probe_underpowered": px.get("stopped_underpowered")}})
+        rep["estimates"].update(sections["estimates_add"])
+        rep["criteria"] = sections["criteria"]
+        rep["noise"] = sections["noise"]
+        rep["power"] = sections["power"]
+        rep["power"]["planned_items"] = plan.n_max
+        rep["power"]["planned_per_capability"] = _planned_counts(cfg, bank_items, plan)
+        rep["deterministic_mode"] = sections["deterministic_mode"]
+    else:
+        rep["criteria"] = {"gating": "harmful_abs", "note": "the 0.1.0 rule (plan.py); the paired criteria are not "
+                                                            "computed under harmful_abs"}
+        rr = noise.pair_stats(records, "ref", "rep", "ref_grade", "rep_grade", cfg.alpha) \
+            if any("rep" in r for r in records) else None
+        rep["noise"] = {"floor": "not measured (harmful_abs keeps the 0.1.0 request pattern; the default criterion "
+                                 "measures the floor)" if rr is None else
+                        {"reference_replicate": rr, "note": "0.1.0 independent-sampling replicate"}}
+        import math as _m
+        rep["power"] = {"criterion": "harmful_abs", "gate": None,
+                        "zero_flip_items_for_tau": _m.ceil(_m.log(cfg.alpha) / _m.log1p(-cfg.tau)),
+                        "note": "harmful_abs has no power gate; with no harmful flip at all the 0.1.0 rule needs "
+                                "this many items to reach EQUIVALENT_WITHIN_TAU"}
+        rep["deterministic_mode"] = {role: determinism.section(
+            (profiles.get(role) or {}).get("kind"), (extra.get("declared") or {}).get(role) or {},
+            {"items": 0, "byte_identical": 0, "answer_flips": 0,
+             "channel_repeat_identity": ((channels or {}).get(role) or {}).get(
+                 "greedy_repeat_identity_rate_without_errors"),
+             "batch_composition_varied": (extra.get("adapters_batching") or {}).get(role)})
+            for role in ("reference", "candidate")}
+    rep["reference_cache"] = extra.get("reference_cache") or {"enabled": False}
     return scrub(rep)
 
 
+def _planned(cfg, bank_items, plan) -> list[dict]:
+    import random as _random
+
+    order = list(bank_items)
+    if cfg.order == "random":
+        _random.Random(cfg.seed).shuffle(order)
+    return order[:plan.n_max]
+
+
+def _planned_counts(cfg, bank_items, plan) -> dict:
+    return dict(sorted(Counter(it["suite"] for it in _planned(cfg, bank_items, plan)).items()))
+
+
 def _pct(x) -> str:
-    return "n/a" if x is None else f"{100 * x:.2f}%"
+    return "n/a" if x is None else f"{100 * x + 0.0:.2f}%"
+
+
+def _f(x, digits: int = 4) -> str:
+    return "n/a" if x is None else f"{x:.{digits}f}"
+
+
+def _paired_summary(rep: dict) -> list[str]:
+    v = rep["verdict"]
+    est = rep["estimates"]
+    pw = rep.get("power") or {}
+    nz = rep.get("noise") or {}
+    fl = nz.get("floor") or {}
+    lines = []
+    crit = v.get("criterion")
+    what = ("net accuracy loss (reference minus candidate) per capability; helpful and harmful flips offset each "
+            "other inside a capability" if crit == "net_change" else
+            "excess harmful-flip rate over the reference's own replicate floor, per capability; helpful flips do "
+            "not offset harmful ones")
+    lines.append(f"- Criterion: `{crit}`: {what}. Power requested: {pw.get('power_requested')}.")
+    if v["verdict"] == "INCONCLUSIVE_UNDERPOWERED":
+        if pw.get("items_needed"):
+            short = ", ".join(f"{s['capability']} {s['planned']} -> {s['needed']}" for s in
+                              (pw.get("short_capabilities") or []))
+            lines.append(f"- Underpowered: the planned {pw.get('planned_items')} items have power "
+                         f"{_f(pw.get('power_at_planned'), 3)} for tau = {v['tau']}; about {pw['items_needed']} items "
+                         f"in the bank's proportions would do" + (f" (capabilities short: {short})" if short else "")
+                         + f". These items support tau >= {pw.get('smallest_tau_at_planned')} per capability.")
+        elif pw.get("items_needed_exceeds"):
+            lines.append(f"- Underpowered: more than {pw['items_needed_exceeds']} items per capability would be "
+                         f"needed. These items support tau >= {pw.get('smallest_tau_at_planned')} per capability.")
+        elif pw.get("floor_source") == "unmeasured":
+            lines.append(f"- No verdict: the noise floor was not measured; at least {pw.get('items_needed_lower_bound')}"
+                         f" items would be needed even with no noise.")
+    d = v.get("pre_gate_deviation")
+    if d and not d.get("allowed_by_power_gate"):
+        lines.append(f"- Evidence of a deviation (not a verdict, the plan is underpowered): at look {d['look']} "
+                     f"(n = {d['n']}) the lower bound exceeded tau for {', '.join(d['capabilities'])} "
+                     f"({', '.join(f'{c}: {_f(b)}' for c, b in d['lower_bounds'].items())}).")
+    if isinstance(fl, dict) and fl:
+        basis = fl.get("basis") or {}
+        items = fl.get("items") or {}
+        lines.append(f"- Noise floor (answer-level repeat-flip rate): {_pct(fl.get('value'))}, the larger of the two "
+                     f"stacks (reference: {basis.get('reference')}, {items.get('reference')} items run twice; "
+                     f"candidate: {basis.get('candidate')}, {items.get('candidate')} items); the power gate used the "
+                     f"{(nz.get('gate_floor') or {}).get('source')} floor.")
+    lines += ["", "## Against the noise floor (one-sided bounds at 1 - alpha)", "",
+              "| quantity | cross-stack | replicate (reference twice) | paired excess | lower | upper |",
+              "|---|---:|---:|---:|---:|---:|"]
+    st = (nz.get("per_stack") or {}).get("reference") or {}
+    rr = st.get("items") or 0
+    for label, cross_key, rep_count, key in (
+            ("harmful flips", "harmful_flip_rate", st.get("harmful_repeat_flips"), "excess_harmful_flip_rate"),
+            ("helpful flips", "helpful_flip_rate", st.get("helpful_repeat_flips"), "excess_helpful_flip_rate"),
+            ("churn (any flip)", "churn_rate", st.get("answer_flips"), "excess_churn")):
+        cross = (est.get(cross_key) or {}).get("point")
+        b = est.get(key) or {}
+        lines.append(f"| {label} | {_pct(cross)} | {_pct(rep_count / rr if rr else None)} | {_pct(b.get('point'))} | "
+                     f"{_pct(b.get('lower'))} | {_pct(b.get('upper'))} |")
+    nb = est.get("net_change") or {}
+    rb = est.get("replicate_net_change") or {}
+    lines.append(f"| net loss (reference - candidate) | {_pct(nb.get('point'))} | "
+                 f"{_pct(0.0 - rb['point'] if rb.get('point') is not None else None)} | | {_pct(nb.get('lower'))} | "
+                 f"{_pct(nb.get('upper'))} |")
+    lines += ["", f"Replicate columns use the items where the reference ran twice "
+                  f"({(est.get('excess_harmful_flip_rate') or {}).get('basis', 'none')}).",
+              "", "## Verdict per capability (paired bound on the gating statistic)", "",
+              "| capability | planned | evaluated | losses | gains | estimate | lower | upper | within tau | power |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|"]
+    for c, d2 in (v.get("per_capability") or {}).items():
+        lines.append(f"| {c} | {d2['planned']} | {d2['evaluated']} | {d2['bad']} | {d2['good']} | {_pct(d2['point'])} | "
+                     f"{_pct(d2['lower'])} | {_pct(d2['upper'])} | {'yes' if d2['within_tau'] else 'no'} | "
+                     f"{_f(d2.get('power_at_planned'), 3)} |")
+    dm = rep.get("deterministic_mode") or {}
+    lines += ["", "## Deterministic mode", ""]
+    for role, d3 in dm.items():
+        lines.append(f"- {role}: {d3['status']} ({d3['basis']}); declared: spec {d3['declared'].get('spec')}, "
+                     f"torch deterministic algorithms {d3['declared'].get('torch_deterministic_algorithms')}"
+                     + (f". {d3['recommendation']}" if d3.get("recommendation") else ""))
+    rc = rep.get("reference_cache") or {}
+    if rc.get("enabled"):
+        lines += ["", "## Reference cache", "", f"Entry found: {rc.get('entry_found')}; hits {rc.get('hits')}; "
+                  f"misses {rc.get('misses')}; reference generation requests this run: "
+                  f"{rc.get('reference_generations')}; written: {rc.get('written')}."]
+    return lines
 
 
 def write_summary(path, rep: dict) -> None:
     v = rep["verdict"]
     est = rep["estimates"]
+    paired = v.get("criterion") in criteria.PAIRED_CRITERIA
     lines = [f"# inferdrift compare: {v['verdict'] or rep['status'].upper()}", ""]
     st = rep["settings"]
     lines.append(f"- Reference: `{st['ref']}`")
@@ -207,13 +569,16 @@ def write_summary(path, rep: dict) -> None:
         lines.append(f"- REFUSED: {rep['refusal']['message']}")
     if rep.get("error"):
         lines.append(f"- ERROR: {rep['error']['message']}")
-    lines += ["", "## Change estimates (one-sided bounds at 1 - alpha)", "",
-              "| quantity | estimate | lower | upper |", "|---|---:|---:|---:|"]
-    for key, label in (("harmful_flip_rate", "harmful flip rate"), ("helpful_flip_rate", "helpful flip rate"),
-                       ("churn_rate", "churn (any flip)"), ("accuracy_change", "accuracy change (cand - ref)")):
-        b = est.get(key)
-        if b:
-            lines.append(f"| {label} | {_pct(b['point'])} | {_pct(b['lower'])} | {_pct(b['upper'])} |")
+    if paired:
+        lines += _paired_summary(rep)
+    else:
+        lines += ["", "## Change estimates (one-sided bounds at 1 - alpha)", "",
+                  "| quantity | estimate | lower | upper |", "|---|---:|---:|---:|"]
+        for key, label in (("harmful_flip_rate", "harmful flip rate"), ("helpful_flip_rate", "helpful flip rate"),
+                           ("churn_rate", "churn (any flip)"), ("accuracy_change", "accuracy change (cand - ref)")):
+            b = est.get(key)
+            if b:
+                lines.append(f"| {label} | {_pct(b['point'])} | {_pct(b['lower'])} | {_pct(b['upper'])} |")
     if est.get("accuracy"):
         lines.append(f"\nAccuracy: reference {_pct(est['accuracy']['reference'])}, "
                      f"candidate {_pct(est['accuracy']['candidate'])}; statistics: {est['stats_backend']}.")

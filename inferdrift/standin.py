@@ -10,7 +10,9 @@ the metadata and native routes of llama.cpp, vLLM and SGLang.
 Backends
     synthetic       deterministic text derived from a hash of the request
     replay:FILE     JSONL lines {"key": request_key(...), "text": ...}; misses fall
-                    back to synthetic text and are counted
+                    back to synthetic text and are counted.  A line may also carry
+                    "alt" and "flip" (a number in [0, 1]): each request for that key
+                    then serves "alt" with probability "flip" (a noisy engine)
     hf:SPEC         a transformers model (needs the hf extra), e.g. hf:Qwen/Qwen3-0.6B
 
 Fault injection (for adversarial tests): ``ignore_seed``, ``no_logprobs``,
@@ -20,6 +22,16 @@ Fault injection (for adversarial tests): ``ignore_seed``, ``no_logprobs``,
 ``fail_every`` (every k-th generation request returns HTTP 500),
 ``bad_usage`` (report malformed token usage - negative, float, string, boolean,
 beyond the exact range or NaN - while the server-side ledger stays truthful).
+
+Noise model of replay lines with "alt" and "flip": the j-th greedy request for a
+key serves "alt" when u < flip, with u = (first 8 bytes of
+sha256(f"{noise_seed}|{key}|{j}")) / 2**64.  A sampled request that carries a
+seed (and the seed is honoured) draws u from sha256(f"{noise_seed}|{key}|s{seed}")
+instead, so the same seed replays the same answer and another seed draws again.
+The draws do not depend on thread interleaving (requests of one key are never
+concurrent in a comparison).  Two stand-ins with different noise seeds are
+independent engines; with the same noise seed they are the same engine, byte for
+byte.
 
 Closed domains: prices are finite and >= 0, fractions lie in their
 intervals, counts are non-negative integers; request bodies are parsed strictly
@@ -111,7 +123,8 @@ class StandinState:
                  api_key: str | None = None, ledger_path: str | None = None, dialect: str = "openai",
                  model_name: str = "standin-model", ignore_seed: bool = False, no_logprobs: bool = False,
                  truncate_frac: float | None = None, leak_key_in_errors: bool = False, nondeterministic: float = 0.0,
-                 fail_every: int = 0, work_dir: str | None = None, bad_usage: str | None = None) -> None:
+                 fail_every: int = 0, work_dir: str | None = None, bad_usage: str | None = None,
+                 noise_seed: int = 0, extra_routes: dict | None = None) -> None:
         self.backend = domains.text(backend, "backend")
         self.price_in = domains.number(price_in, "price_in", ge=0.0, le=1e6)
         self.price_out = domains.number(price_out, "price_out", ge=0.0, le=1e6)
@@ -127,6 +140,13 @@ class StandinState:
         self.nondet = domains.number(nondeterministic, "nondeterministic", ge=0.0, le=1.0)
         self.fail_every = domains.integer(fail_every, "fail_every", ge=0, le=1 << 20)
         self.bad_usage = None if bad_usage is None else domains.choice(bad_usage, "bad_usage", BAD_USAGE)
+        self.noise_seed = domains.integer(noise_seed, "noise_seed", ge=0, le=domains.MAX_EXACT_INT)
+        if extra_routes is not None and (not isinstance(extra_routes, dict) or not all(
+                isinstance(k, str) and k.startswith("/") and isinstance(v, dict) for k, v in extra_routes.items())):
+            raise BadInputError("extra_routes", "must map paths starting with / to JSON objects")
+        self.extra_routes = dict(extra_routes or {})
+        self.noise: dict[str, tuple[str, float]] = {}
+        self.key_requests: dict[str, int] = {}
         self.lock = threading.Lock()
         self.totals = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0, "errors": 0,
                        "replay_misses": 0}
@@ -142,10 +162,16 @@ class StandinState:
             except StrictJSONError as e:
                 raise BadInputError(f"replay file {path}", f"is not strict JSON ({e})") from None
             for no, e in rows:
-                if not isinstance(e, dict) or set(e) != {"key", "text"} or not isinstance(e["key"], str) \
-                        or not isinstance(e["text"], str):
-                    raise BadInputError(f"replay file {path}:{no}", "each line must be {\"key\": str, \"text\": str}")
+                where = f"replay file {path}:{no}"
+                if not isinstance(e, dict) or set(e) not in ({"key", "text"}, {"key", "text", "alt", "flip"}) \
+                        or not isinstance(e["key"], str) or not isinstance(e["text"], str):
+                    raise BadInputError(where, "each line must be {\"key\": str, \"text\": str} or also carry "
+                                               "\"alt\": str and \"flip\": a number in [0, 1]")
                 self.replay[e["key"]] = e["text"]
+                if "alt" in e:
+                    if not isinstance(e["alt"], str):
+                        raise BadInputError(f"{where}.alt", "must be a string", e["alt"])
+                    self.noise[e["key"]] = (e["alt"], domains.number(e["flip"], f"{where}.flip", ge=0.0, le=1.0))
         elif backend.startswith("hf:"):
             self._load_hf(backend, work_dir)
 
@@ -195,6 +221,10 @@ class StandinState:
         else:
             if key in self.replay:
                 text = self.replay[key]
+                if key in self.noise:
+                    alt, flip = self.noise[key]
+                    if self._noise_draw(key, sampled, seed) < flip:
+                        text = alt
             else:
                 with self.lock:
                     if self.replay:
@@ -224,6 +254,18 @@ class StandinState:
                 ct = approx_tokens(text)
             fin = "stop"
         return text, pt, ct, fin
+
+    def _noise_draw(self, key: str, sampled: bool, seed) -> float:
+        if sampled:
+            if self.ignore_seed or seed is None:
+                return random.random()
+            tag = f"{self.noise_seed}|{key}|s{seed}"
+        else:
+            with self.lock:
+                j = self.key_requests.get(key, 0)
+                self.key_requests[key] = j + 1
+            tag = f"{self.noise_seed}|{key}|{j}"
+        return int.from_bytes(hashlib.sha256(tag.encode()).digest()[:8], "big") / 2.0 ** 64
 
     def bill(self, route: str, pt: int, ct: int, status: int = 200) -> float:
         usd = (pt * self.price_in + ct * self.price_out) / 1e6
@@ -333,6 +375,8 @@ def make_handler(state: StandinState):
             if p == "/ledger":
                 with state.lock:
                     return self._send(200, dict(state.totals))
+            if p in state.extra_routes:
+                return self._send(200, state.extra_routes[p])
             if state.dialect == "llamacpp" and p == "/props":
                 return self._send(200, {"default_generation_settings": {"n_ctx": 32768}, "total_slots": 1,
                                         "model_path": f"/models/{state.model_name}.gguf",
@@ -487,7 +531,8 @@ def main_serve(args) -> int:
                          ledger_path=args.ledger, dialect=args.dialect, model_name=args.model_name,
                          ignore_seed=args.ignore_seed, no_logprobs=args.no_logprobs, truncate_frac=args.truncate_frac,
                          leak_key_in_errors=args.leak_key_in_errors, nondeterministic=args.nondeterministic,
-                         fail_every=args.fail_every, work_dir=args.work_dir, bad_usage=getattr(args, "bad_usage", None))
+                         fail_every=args.fail_every, work_dir=args.work_dir, bad_usage=getattr(args, "bad_usage", None),
+                         noise_seed=getattr(args, "noise_seed", 0))
     try:
         httpd = ThreadingHTTPServer((args.host, args.port), make_handler(state))
     except OSError as e:  # e.g. the port is already in use: a clean error (exit 4), not a traceback

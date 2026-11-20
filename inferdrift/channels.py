@@ -7,6 +7,9 @@ Probes (all metered; none of them is graded):
 * ``greedy_repeat_identity_rate`` - the same greedy request sent ``repeats`` times
   per probe prompt, in separate calls; the share of repeats byte-identical to the
   first.  Below 1.0 the stack is not deterministic under greedy decoding.
+  ``greedy_repeat_identity_rate_without_errors`` is the same share over the
+  repeat pairs where neither output is an error (an error is not an answer, so
+  it never counts as nondeterminism there).
 * ``top_logprobs`` / ``top_logprobs_k`` - a greedy request asking for top-5
   token log-probabilities.
 * ``prompt_logprobs`` - log-probabilities of the prompt tokens.
@@ -47,19 +50,27 @@ def detect_channels(adapter, meter, *, repeats: int = 3, top_k: int = 5) -> dict
 
     try:
         # greedy repeat identity
-        same = total = 0
+        same = total = same_ok = total_ok = 0
         firsts = {}
+        first_err = {}
         for r in range(repeats):
             outs = run([_req(f"probe-greedy-{i}", t, 32, greedy) for i, t in enumerate(GREEDY_PROBES)])
             for i, o in enumerate(outs):
+                bad = bool(o.error) or o.finish_reason == "error"
                 if o.error:
                     rep["errors"].append(scrub_text(o.error))
                 if r == 0:
                     firsts[i] = o.text
+                    first_err[i] = bad
                 else:
                     total += 1
                     same += int(o.text == firsts[i])
+                    if not bad and not first_err.get(i, True):
+                        total_ok += 1
+                        same_ok += int(o.text == firsts[i])
         rep["greedy_repeat_identity_rate"] = (same / total) if total else None
+        rep["greedy_repeat_pairs_without_errors"] = total_ok
+        rep["greedy_repeat_identity_rate_without_errors"] = (same_ok / total_ok) if total_ok else None
         rep["usage_reported"] = None
         # top-k logprobs
         o = run([_req("probe-logprobs", GREEDY_PROBES[0], 8, greedy, top_logprobs=top_k)])[0]
