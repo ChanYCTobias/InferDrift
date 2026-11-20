@@ -342,8 +342,8 @@ def cmd_power(a) -> int:
            "method": "exact pass probability of the paired bound (the bound compare uses), product over equal "
                      "capabilities; items_needed is a total that reaches the power while one fewer does not, and "
                      "every total from it to items_needed_checked_up_to was checked to reach it too (5% more, at "
-                     "least 50 and at most 200); exact power is not monotone in n, and larger totals were not "
-                     "checked"}
+                     "least 50 and at most 200, unless the search cap comes first); exact power is not monotone in "
+                     "n, and larger totals were not checked"}
     if need["items_needed"] is None:
         out["items_needed_search_stopped_at"] = need["searched_to"]
         out["items_needed_note"] = need["note"]

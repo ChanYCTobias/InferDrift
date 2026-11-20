@@ -275,10 +275,11 @@ def _transition(is_powered, start: int, upper: int) -> int | None:
     return hi
 
 
-def threshold(is_powered, *, upper: int, above: int = 0) -> dict:
+def threshold(is_powered, *, upper: int, above: int = 0, check_above: bool = True) -> dict:
     """The size reported as "needed": N > ``above`` that is powered, whose one-smaller size is not (or
     is ``above``), and such that every size from N to min(upper, N + check_window(N)) is powered.
-    When a size in that window is not powered, the search continues above it.
+    When a size in that window is not powered, the search continues above it.  With
+    ``check_above=False`` the window is skipped (N is then only a size that is powered while N - 1 is not).
 
     Returns {"n": N or None, "checked_up_to": the last size checked to be powered, or None}.
     Nothing is claimed about sizes above ``checked_up_to``."""
@@ -287,6 +288,8 @@ def threshold(is_powered, *, upper: int, above: int = 0) -> dict:
         n = _transition(is_powered, start, upper)
         if n is None:
             return {"n": None, "checked_up_to": None}
+        if not check_above:
+            return {"n": n, "checked_up_to": n}
         top = min(upper, n + check_window(n))
         short = next((k for k in range(n + 1, top + 1) if not is_powered(k)), None)
         if short is None:
@@ -295,7 +298,8 @@ def threshold(is_powered, *, upper: int, above: int = 0) -> dict:
 
 
 def items_needed(weights: dict, models: dict, alpha: float, tau: float, power: float, *, above: int = 0,
-                 phi: float = DEFAULT_NUISANCE_FRACTION, cap_per_capability: int = MAX_ITEMS_PER_CAPABILITY) -> dict:
+                 phi: float = DEFAULT_NUISANCE_FRACTION, cap_per_capability: int = MAX_ITEMS_PER_CAPABILITY,
+                 check_above: bool = True) -> dict:
     """The total item count needed with capabilities in the proportions ``weights`` (``threshold`` over
     totals, each total allocated by ``allocate``).
 
@@ -311,9 +315,9 @@ def items_needed(weights: dict, models: dict, alpha: float, tau: float, power: f
         return powered(allocate(N, weights), models, alpha, tau, power, phi)
 
     cap_total = int(cap_per_capability / max(weights.values()) * sum(weights.values()))
-    r = threshold(is_powered, upper=cap_total)
+    r = threshold(is_powered, upper=cap_total, check_above=check_above)
     if r["n"] is not None and r["n"] <= above:
-        r = threshold(is_powered, upper=cap_total, above=above)
+        r = threshold(is_powered, upper=cap_total, above=above, check_above=check_above)
     if r["n"] is None:
         at_stop = allocate(cap_total, weights)
         largest = min(at_stop, key=lambda c: (-at_stop[c], str(c)))

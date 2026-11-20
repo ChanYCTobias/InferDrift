@@ -325,20 +325,22 @@ reference's noise floor (`harmful_excess`), or the harmful-flip rate
   needed, which capabilities are short, and the smallest tolerance the bank
   supports. The number is searched on what the run tested: when `--max-items`
   cut the bank, it is a `--max-items` value for the same bank, seed and item
-  order; otherwise it is a bank size in the bank's proportions. It reaches the
-  requested power while one item fewer does not, and every size up to 5% above
-  it (at least 50 and at most 200 sizes) was checked to reach it as well. Exact
-  power is not monotone in the number of items, so larger sizes were not
-  checked. If the search reaches 20,000 items in the largest capability without
-  finding enough, the report gives the size where it stopped and the power
-  there, instead of a number. A capability is short when its own power at its
-  planned count is below `--power`; the report gives the number it needs on its
-  own (what `inferdrift power` gives at its floor); in the joint plan it can
-  need more. With no noise at all and alpha = 0.05, power 0.9, the default
-  criterion needs 597 items per capability for tau = 0.01, 297 for 0.02 and 117
-  for 0.05; noise raises these numbers (`inferdrift power`). If the bounds
-  already pointed to a deviation, the report says so as evidence, not as a
-  verdict.
+  order; otherwise, or when even the whole bank is not enough, it is a bank size
+  in the bank's proportions. It reaches the requested power while one item fewer
+  does not, and every size up to 5% above it (at least 50 and at most 200 sizes,
+  unless the end of the bank or the search's cap comes first) was checked to
+  reach it as well. Exact power is not monotone in the number of items, and
+  sizes beyond that range were not checked. If the search reaches 20,000 items
+  in the largest capability without finding enough, the report gives the size
+  where it stopped and the power there, instead of a number. A capability is
+  short when its own power at its planned count is below `--power`; the report
+  gives a size at which it reaches the power on its own (one fewer does not; the
+  sizes above it are not checked, so `inferdrift power` at its floor can give a
+  slightly larger number); in the joint plan it can need more. With no noise at
+  all and alpha = 0.05, power 0.9, the default criterion needs 597 items per
+  capability for tau = 0.01, 297 for 0.02 and 117 for 0.05; noise raises these
+  numbers (`inferdrift power`). If the bounds already pointed to a deviation,
+  the report says so as evidence, not as a verdict.
 - `INCONCLUSIVE`: none of these holds, for example a cap stopped the run early,
   the reference failed on some items, or the bounds straddle tau. Under
   `harmful_abs` (no power check) this also covers too few items: with no harmful

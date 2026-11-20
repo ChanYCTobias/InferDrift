@@ -1107,7 +1107,10 @@ def evaluate_gate(cfg, records: list[dict], planned_caps: Counter, bank_caps: Co
         at_stop = need.get("per_capability_at_stop") or {}
         for c in sorted(planned):
             if per_cap_power[c] < target:  # below the power on its own, so the plan cannot reach it
-                alone = pw.items_needed({c: 1}, {c: models[c]}, alpha, tau, target, cap_per_capability=cap)
+                # without the window above it: one windowed search per short capability, each with its own
+                # floor, would cost minutes at the end of a noisy run on a bank of several capabilities
+                alone = pw.items_needed({c: 1}, {c: models[c]}, alpha, tau, target, cap_per_capability=cap,
+                                        check_above=False)
                 short.append({"capability": c, "planned": planned[c], "power_at_planned": per_cap_power[c],
                               "needed": at_need.get(c), "at_search_stop": at_stop.get(c),
                               "needed_alone": alone["items_needed"], "needed_alone_exceeds": alone["exceeds"]})
