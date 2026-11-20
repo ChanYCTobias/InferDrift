@@ -226,6 +226,9 @@ def _paired_sections(cfg, records, looks, extra, channels, coupling, profiles) -
             lim.append(f"the planned items have power {gate.get('power_at_planned'):.3f} < {cfg.power} for tau = "
                        f"{tau} at the measured floor: the verdict is INCONCLUSIVE_UNDERPOWERED, never a pass or a "
                        f"fail" + (f"; about {need['items_needed']} items would do" if need.get("items_needed") else ""))
+    if gate.get("floor_source") == "supplied" and not (fl or {}).get("measured"):
+        lim.append("the power gate used the supplied --plan-floor; nothing in this run measured the floor (no item "
+                   "was run twice), so the run could not check it")
     if gate.get("supplied_floor_contradicted"):
         lim.append("the supplied --plan-floor is below what this run measured; the gate used the measured floor")
     if px.get("excluded"):
@@ -348,6 +351,11 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
     elif coupling and any("not deterministic under greedy decoding" in f for f in coupling.get("flags", [])):
         limitations.append("harmful_abs counts a stack's own nondeterminism as harm; the default criterion "
                            "(net_change) measures the noise floor and judges against it")
+    if not paired and coupling and coupling.get("independent_bounds"):
+        limitations.append("harmful_abs keeps the 0.1.0 sampling construction: the candidate shares the reference's "
+                           "seed while the reference's replicate has its own, so when both stacks run the same "
+                           "sampler the subtracted floor is sampling noise the cross pair does not have, and the "
+                           "excess bound can be too optimistic; the default criterion gives every run its own seed")
     cost = meter.snapshot()
     bad_usage = {k: v.get("invalid_usage_requests") for k, v in cost["per_stack"].items()
                  if v.get("invalid_usage_requests")}

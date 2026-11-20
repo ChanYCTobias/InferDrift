@@ -105,6 +105,10 @@ def test_unmeasured_floor_gives_no_pass_or_fail(tmp_path, standins, fx):
                        ["--tau", "0.1", "--floor-probe-items", "0", "--skip-channels", "--exit-on-verdict"])
     assert rep["verdict"]["verdict"] == "INCONCLUSIVE_UNDERPOWERED" and code == 12
     assert rep["power"]["floor_source"] == "unmeasured" and rep["power"]["items_needed_lower_bound"] == 57
+    _, _, rep = run(standins, fx, tmp_path / "supplied_only", fx["det"], fx["det"],
+                    ["--tau", "0.1", "--floor-probe-items", "0", "--skip-channels", "--plan-floor", "0"])
+    assert rep["verdict"]["gates"]["floor_source"] == "supplied"
+    assert any("nothing in this run measured the floor" in x for x in rep["limitations"])
 
 
 def test_stop_if_underpowered_stops_after_the_probe(tmp_path, standins, fx):

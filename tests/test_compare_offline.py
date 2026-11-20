@@ -145,6 +145,7 @@ def test_ignored_seed_switches_to_independent_bounds(tmp_path, standins, known):
     assert rep["coupling"]["mode"] == "independent" and rep["coupling"]["independent_bounds"] is True
     assert rep["verdict"]["statistic"] == "excess_harmful_flip_rate"
     assert any("seed not honoured" in x for x in rep["limitations"])
+    assert any("keeps the 0.1.0 sampling construction" in x for x in rep["limitations"])
     records = [json.loads(x) for x in (tmp_path / "seed" / "items.jsonl").read_text().splitlines() if x.strip()]
     assert records and all("rep" in r for r in records)  # the reference replicate ran
     _, _, rep = compare(pa, pb, bank, tmp_path / "seed_default", ["--decode", "sample", "--max-items", "64"])
@@ -225,6 +226,21 @@ def test_dollar_cap_binds_against_the_server_ledger(tmp_path, standins, known):
     assert abs(cost["usd_total"] - server_usd) <= 1e-9
     assert cost["caps"] == {"max_usd": 0.05, "max_tokens": None, "max_wall_s": None}
     assert rep["verdict"]["verdict"] == "INCONCLUSIVE"
+
+
+def test_dollar_cap_binds_under_the_default_criterion(tmp_path, standins, known):
+    """The probe, the second runs and the retries are metered like every other request."""
+    items, bank, replay = known
+    sa, pa = standins.start(backend=f"replay:{replay}", price_in=10.0, price_out=30.0)
+    sb, pb = standins.start(backend=f"replay:{replay}", price_in=10.0, price_out=30.0, nondeterministic=0.5)
+    code, _, rep = compare(pa, pb, bank, tmp_path / "cap", ["--ref-price", "10,30", "--cand-price", "10,30",
+                                                            "--max-usd", "0.08", "--tau", "0.1"])
+    server_usd = sa.totals["usd"] + sb.totals["usd"]
+    cost = rep["cost"]
+    assert code == 0 and rep["status"] == "completed" and cost["stopped_by"] == "usd"
+    assert 0 < server_usd <= 0.08 and abs(cost["usd_total"] - server_usd) <= 1e-9
+    assert rep["verdict"]["verdict"] not in ("EQUIVALENT_WITHIN_TAU", "DEVIATES")
+    assert rep["noise"]["routing"]["reference_every_item"] is True  # the noisy candidate routed both stacks
 
 
 @pytest.mark.parametrize("dialect", ["llamacpp", "vllm", "sglang", "openai"])

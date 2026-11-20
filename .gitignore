@@ -20,3 +20,5 @@ htmlcov/
 # Run output (the default compare output directory, and the README demo)
 inferdrift-out/
 demo/
+demo_math/
+demo_abs/

@@ -1038,10 +1038,11 @@ def evaluate_gate(cfg, records: list[dict], planned_caps: Counter, bank_caps: Co
     weights = {c: bank_caps[c] for c in caps_all if bank_caps[c] > 0} or dict(planned)
     n_planned = sum(planned.values())
     if underpowered and source != "unmeasured":
-        need = pw.items_needed(weights, {c: models[c] for c in weights}, alpha, tau, target, above=n_planned)
+        need = pw.items_needed(weights, {c: models[c] for c in weights}, alpha, tau, target, above=n_planned,
+                               cap_per_capability=pw.COMPARE_SEARCH_CAP)
     elif source == "unmeasured":
         zero = {c: pw.model_for(crit, 0.0) for c in weights}
-        lb = pw.items_needed(weights, zero, alpha, tau, target, above=0)
+        lb = pw.items_needed(weights, zero, alpha, tau, target, above=0, cap_per_capability=pw.COMPARE_SEARCH_CAP)
         need = {"items_needed": None, "per_capability": None, "exceeds": None,
                 "lower_bound": lb["items_needed"],
                 "note": "the floor was not measured; the zero-floor size is only a lower bound and no verdict is "

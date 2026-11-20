@@ -51,6 +51,7 @@ from .exactstats.paired import DEFAULT_NUISANCE_FRACTION, levels
 
 EPS = 1e-12
 MAX_ITEMS_PER_CAPABILITY = 100_000
+COMPARE_SEARCH_CAP = 20_000  # per capability, for the search inside every compare (the power command uses 100k)
 _CP_CACHE: dict = {}
 _POW_CACHE: dict = {}
 
@@ -215,6 +216,18 @@ def power_total(counts: dict, models: dict, alpha: float, tau: float, phi: float
     return p
 
 
+def powered(counts: dict, models: dict, alpha: float, tau: float, target: float,
+            phi: float = DEFAULT_NUISANCE_FRACTION) -> bool:
+    """power_total(...) >= target, evaluating the smallest capabilities first and stopping as soon as the
+    running product falls below the target (every remaining factor is at most 1)."""
+    p = 1.0
+    for c in sorted(counts, key=lambda c: (counts[c], str(c))):
+        p *= pass_probability(counts[c], models[c], alpha, tau, phi)
+        if p < target:
+            return False
+    return True
+
+
 def allocate(total: int, weights: dict) -> dict:
     """Largest-remainder rounding of total * w_c (weights need not sum to 1)."""
     s = sum(weights.values())
@@ -233,13 +246,13 @@ def items_needed(weights: dict, models: dict, alpha: float, tau: float, power: f
 
     Doubling from ``above``, bisection, then a short downward scan.  Returns
     {"items_needed": N | None, "per_capability": {...}, "exceeds": cap or None}."""
-    def powered(N: int) -> bool:
-        return power_total(allocate(N, weights), models, alpha, tau, phi) >= power
+    def is_powered(N: int) -> bool:
+        return powered(allocate(N, weights), models, alpha, tau, power, phi)
 
     cap_total = int(cap_per_capability / max(weights.values()) * sum(weights.values()))
     lo = above
     hi = max(above + 1, 16)
-    while not powered(hi):
+    while not is_powered(hi):
         if hi >= cap_total:
             return {"items_needed": None, "per_capability": None, "exceeds": cap_per_capability,
                     "note": f"not powered with {cap_per_capability} items in the largest capability"}
@@ -247,12 +260,12 @@ def items_needed(weights: dict, models: dict, alpha: float, tau: float, power: f
         hi = min(cap_total, hi * 2)
     while hi - lo > 1:
         mid = (lo + hi) // 2
-        if powered(mid):
+        if is_powered(mid):
             hi = mid
         else:
             lo = mid
     for _ in range(64):
-        if hi - 1 > above and powered(hi - 1):
+        if hi - 1 > above and is_powered(hi - 1):
             hi -= 1
         else:
             break
