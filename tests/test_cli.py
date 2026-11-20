@@ -69,7 +69,7 @@ def test_standin_server_listens(tmp_path):
 
 @pytest.mark.parametrize("extra", [["--price-in", "nan"], ["--price-out", "-1"], ["--price-in", "inf"],
                                    ["--truncate-frac", "2"], ["--nondeterministic", "nan"], ["--fail-every", "-1"],
-                                   ["--port", "70000"]])
+                                   ["--port", "70000"], ["--noise-seed", "-1"], ["--noise-seed", "1.5"]])
 def test_standin_refuses_bad_values(extra):
     code, out = run_main(["standin", "--port", "0"] + extra)
     line = strict_last_line(out)
@@ -147,6 +147,19 @@ CLI_CASES = [
     ("spec_duplicate_param", [], PRICE, "?model=a&model=b", None),
     ("argparse_bad_choice", ["--decode", "fuzzy"], PRICE, "", None),
     ("argparse_unknown_option", ["--max-dollars", "1"], PRICE, "", None),
+    ("criterion_unknown", ["--criterion", "accuracy"], PRICE, "", None),
+    ("power_zero", ["--power", "0"], PRICE, "", "--power"),
+    ("power_one", ["--power", "1"], PRICE, "", "--power"),
+    ("power_nan", ["--power", "nan"], PRICE, "", "--power"),
+    ("probe_negative", ["--floor-probe-items", "-1"], PRICE, "", "--floor-probe-items"),
+    ("probe_fraction", ["--floor-probe-items", "1.5"], PRICE, "", "--floor-probe-items"),
+    ("probe_huge", ["--floor-probe-items", "1000001"], PRICE, "", "--floor-probe-items"),
+    ("plan_floor_above_one", ["--plan-floor", "1.5"], PRICE, "", "--plan-floor"),
+    ("plan_floor_nan", ["--plan-floor", "nan"], PRICE, "", "--plan-floor"),
+    ("replicate_unknown", ["--replicate", "sometimes"], PRICE, "", None),
+    ("abs_with_probe", ["--criterion", "harmful_abs", "--floor-probe-items", "8"], PRICE, "", "criterion"),
+    ("abs_with_plan_floor", ["--criterion", "harmful_abs", "--plan-floor", "0.1"], PRICE, "", "criterion"),
+    ("spec_deterministic_unknown", [], PRICE, "?deterministic=maybe", "deterministic"),
 ]
 
 
@@ -187,3 +200,33 @@ def test_seed_at_the_top_of_its_domain_still_runs(tmp_path, priced):
                         "--skip-channels", "--decode", "sample", "--seed", "9007199254740991", "--max-items", "32"])
     rep = json.loads((tmp_path / "top" / "report.json").read_text())
     assert code == 0 and rep["status"] == "completed" and rep["coupling"]["independent_bounds"] is True
+
+
+def test_power_command():
+    code, out = run_main(["power", "--tau", "0.05"])
+    res = loads_strict(out)
+    assert code == 0 and res["items_needed"] == 117 and res["criterion"] == "net_change"
+    code, out = run_main(["power", "--tau", "0.1", "--floor", "0.1", "--capability-count", "3", "--items", "600"])
+    res = loads_strict(out)
+    assert code == 0 and res["items_needed_per_capability"] and len(res["items_needed_per_capability"]) == 3
+    assert 0.0 <= res["power_at_items"] <= 1.0 and 0.0 < res["smallest_tau_at_items"] < 1.0
+    code, out = run_main(["power", "--criterion", "harmful_excess", "--tau", "0.1", "--floor", "0.1", "--excess", "0.02"])
+    assert code == 0 and loads_strict(out)["model"]["kind"] == "harmful_excess"
+
+
+@pytest.mark.parametrize("extra", [["--tau", "0"], ["--power", "1"], ["--floor", "nan"], ["--loss", "0.5", "--floor", "0.9"],
+                                   ["--criterion", "harmful_excess", "--loss", "0.01"], ["--excess", "0.01"],
+                                   ["--capability-count", "0"], ["--items", "0"], ["--criterion", "harmful_abs"]])
+def test_power_command_refuses_bad_values(extra):
+    code, out = run_main(["power"] + extra)
+    line = strict_last_line(out)
+    assert code == 3 and line["status"] == "refused"
+
+
+def test_exit_code_of_an_underpowered_verdict(tmp_path, priced):
+    sa, pa, sb, pb, bank = priced
+    code, out = run_main(["compare", "--ref", url(pa), "--cand", url(pb), "--bank", bank, "--out", tmp_path / "u",
+                          "--skip-channels", "--exit-on-verdict"])
+    line = strict_last_line(out)
+    assert code == 12 and line["verdict"] == "INCONCLUSIVE_UNDERPOWERED" and line["items_needed"] > 96
+    assert line["criterion"] == "net_change" and line["floor"]["source"] == "measured"
