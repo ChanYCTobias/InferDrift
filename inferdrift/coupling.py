@@ -33,14 +33,19 @@ def plan_coupling(decode, ref_adapter, cand_adapter, ref_ch: dict | None, cand_c
     paired = criterion != "harmful_abs"
     for name, ch in (("reference", ref_ch), ("candidate", cand_ch)):
         rate = (ch or {}).get("greedy_repeat_identity_rate")
-        if rate is not None and rate < 1.0:
-            if paired:
-                flags.append(f"{name} is not deterministic under greedy decoding (repeat identity {rate:.2f}); "
-                             f"routed to the noise floor: the reference runs twice and the verdict is judged "
-                             f"against that floor")
-            else:
-                flags.append(f"{name} is not deterministic under greedy decoding (repeat identity {rate:.2f}); "
-                             f"part of the observed churn is the stack's own nondeterminism")
+        if paired:
+            # the rate that routing uses: errored repeats are not counted as nondeterminism
+            clean = (ch or {}).get("greedy_repeat_identity_rate_without_errors")
+            if clean is not None and clean < 1.0:
+                flags.append(f"{name} is not deterministic under greedy decoding (repeat identity {clean:.2f}, "
+                             f"errors left out); routed to the noise floor: the reference runs twice and the verdict "
+                             f"is judged against that floor")
+            elif rate is not None and rate < 1.0:
+                flags.append(f"{name}'s channel probe had errored requests (repeat identity {rate:.2f} counting "
+                             f"them); errors are not counted as nondeterminism, so this alone routes nothing")
+        elif rate is not None and rate < 1.0:
+            flags.append(f"{name} is not deterministic under greedy decoding (repeat identity {rate:.2f}); "
+                         f"part of the observed churn is the stack's own nondeterminism")
     if decode.mode == "greedy":
         return {"mode": "greedy", "coupled": True, "independent_bounds": False,
                 "reason": "greedy decoding on both stacks", "flags": flags}

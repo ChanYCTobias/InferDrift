@@ -486,7 +486,8 @@ def run_compare(cfg: CompareConfig) -> dict:
     cache = None
     channels_from_cache = False
     px: dict = {"criterion": crit, "probe_items": probe_n, "routing": None, "pass_errors": {}, "pre_gate_deviation":
-                None, "gate": None, "excluded": 0, "complete": False, "run_counts": None, "stopped_underpowered": False,
+                None, "allowed_deviation": None, "deviates_look": None, "withdrawn_first_verdict": None,
+                "gate": None, "excluded": 0, "complete": False, "run_counts": None, "stopped_underpowered": False,
                 "rule": None, "same_coupling": None, "ref_all": False, "cand_all": False}
     try:
         ref_spec, cand_spec = parse_spec(cfg.ref), parse_spec(cfg.cand)
@@ -672,6 +673,13 @@ def run_compare(cfg: CompareConfig) -> dict:
             state["refusal"] = {"code": e.code, "message": scrub_text(str(e)), "plan": None}
             event("refused", code=e.code)
             verdict, bound = None, None
+        if verdict is not None and first_verdict is not None and first_verdict.get("verdict") == DEVIATES \
+                and verdict != DEVIATES:
+            # the run went on after a DEVIATES look (no early stop) and the final power gate, with the floor
+            # known at the end, finds the plan underpowered: the final gate decides, and the report says so
+            px["withdrawn_first_verdict"] = dict(first_verdict)
+            event("first_verdict_withdrawn", look=first_verdict.get("look"), n=first_verdict.get("n"), verdict=verdict)
+            first_verdict = None
         if verdict is not None and first_verdict is None:
             first_verdict = {"verdict": verdict, "look": len(looks_out) - 1 if looks_out else None, "n": n,
                              "elapsed_s": round(time.monotonic() - mono0, 3), "utc": _utc(),
@@ -963,7 +971,7 @@ def _paired_chunks(cfg, plan, order, probe_n, boundaries, pending, run_pass, *, 
                     px["stopped_underpowered"] = True
                     stop = True
         # ---- looks reached by this chunk
-        while pending and pending[0][1] <= n_done and not px["stopped_underpowered"]:
+        while pending and pending[0][1] <= n_done:  # with --stop-if-underpowered, the looks the probe covers
             li, look_n = pending.pop(0)
             fold_to(look_n)
             dev, lbs = criteria.look_check(run_counts, alpha_look, tau)
@@ -974,12 +982,15 @@ def _paired_chunks(cfg, plan, order, probe_n, boundaries, pending, run_pass, *, 
             if dev:
                 gate_info = gate_now(False)
                 allowed = not gate_info["underpowered"]
-                if px["pre_gate_deviation"] is None:
-                    px["pre_gate_deviation"] = {
-                        "look": li, "n": look_n, "alpha_look": alpha_look,
-                        "capabilities": sorted(c for c, v in lbs.items() if v is not None and v > tau),
-                        "lower_bounds": {c: v for c, v in lbs.items() if v is not None and v > tau},
-                        "allowed_by_power_gate": allowed}
+                dev_rec = {"look": li, "n": look_n, "alpha_look": alpha_look,
+                           "capabilities": sorted(c for c, v in lbs.items() if v is not None and v > tau),
+                           "lower_bounds": {c: v for c, v in lbs.items() if v is not None and v > tau},
+                           "allowed_by_power_gate": allowed, "power_at_planned": gate_info["power_at_planned"],
+                           "floor_source": gate_info["floor_source"]}
+                if px["pre_gate_deviation"] is None:  # the first look whose bound exceeded tau
+                    px["pre_gate_deviation"] = dev_rec
+                if allowed and px["allowed_deviation"] is None:  # the first one the power gate allowed
+                    px["allowed_deviation"] = dev_rec
             lbv = [v for v in lbs.values() if v is not None]
             looks_out.append({"look": li, "n": look_n, "harmful": sum(1 for r in seen if r["flip"] < 0),
                               "helpful": sum(1 for r in seen if r["flip"] > 0), "alpha_look": alpha_look,
@@ -1127,8 +1138,11 @@ def _final_paired(cfg, plan, n_max, planned_caps, bank_caps, records, looks_out,
                               all_within=all_within)
     if px["n_done"] == 0 and state.get("stopped_by"):
         verdict = criteria.INCONCLUSIVE  # a cap stopped the run before any item: no statement about power either
-    if verdict == criteria.DEVIATES and px["pre_gate_deviation"]:
-        cap = max(px["pre_gate_deviation"]["lower_bounds"], key=px["pre_gate_deviation"]["lower_bounds"].get)
+    px["final_verdict"] = verdict
+    dev_rec = (px.get("allowed_deviation") or px["pre_gate_deviation"]) if verdict == criteria.DEVIATES else None
+    px["deviates_look"] = dev_rec
+    if dev_rec:
+        cap = max(dev_rec["lower_bounds"], key=dev_rec["lower_bounds"].get)
     else:
         cap = max(ubs, key=lambda c: (ubs[c] if ubs[c] is not None else 2.0)) if ubs else None
     bound = None

@@ -282,6 +282,92 @@ def test_a_one_item_capability_is_named_when_the_search_stops_at_its_cap(tmp_pat
     assert "t_tiny 1 planned" in summary
 
 
+# ------------------------------------------------------------------ deviations, the power gate and the stopping path
+def test_a_deviates_first_verdict_that_the_final_gate_withdraws_is_not_reported_as_one(tmp_path, standins):
+    """The candidate is wrong on the first 64 items, and both stacks are noisy only on the last 150, so the
+    floor is 0 at the early looks and about 0.25 at the end.  With early stop the run stops at DEVIATES;
+    without it, the final power gate finds the plan underpowered and decides."""
+    items = make_single_suite_bank(300)
+    bank = write_bank(items, tmp_path / "bank.jsonl")
+    late = {it["id"] for it in items[150:]}
+    early = {it["id"] for it in items[:64]}
+    ref = write_noisy_replay(items, tmp_path / "ref.jsonl", correct_output, wrong_output,
+                             lambda it: 0.5 if it["id"] in late else 0.0)
+    cand = write_noisy_replay(items, tmp_path / "cand.jsonl",
+                              lambda it: wrong_output(it) if it["id"] in early else correct_output(it), wrong_output,
+                              lambda it: 0.5 if it["id"] in late else 0.0)
+    reps = {}
+    for label, extra in (("early_stop", []), ("no_early_stop", ["--no-early-stop"])):
+        _, pa = standins.start(backend=f"replay:{ref}", noise_seed=0)
+        _, pb = standins.start(backend=f"replay:{cand}", noise_seed=1)
+        run_main(["compare", "--ref", url(pa), "--cand", url(pb), "--bank", bank, "--order", "bank", "--tau", "0.1",
+                  "--replicate", "always", "--out", tmp_path / label] + extra)
+        reps[label] = json.loads((tmp_path / label / "report.json").read_text())
+    v = reps["early_stop"]["verdict"]
+    assert v["verdict"] == "DEVIATES" and v["first_verdict"]["verdict"] == "DEVIATES" and v["first_verdict"]["n"] == 32
+    assert v["gates"]["deviates_look"]["n"] == 32 and v["withdrawn_first_verdict"] is None
+    v = reps["no_early_stop"]["verdict"]
+    assert v["verdict"] == "INCONCLUSIVE_UNDERPOWERED" and v["first_verdict"]["verdict"] == "INCONCLUSIVE_UNDERPOWERED"
+    assert v["withdrawn_first_verdict"]["n"] == 32 and v["gates"]["deviates_look"] is None
+    assert any("final power gate withdrew" in x for x in reps["no_early_stop"]["limitations"])
+    summary = (tmp_path / "no_early_stop" / "summary.md").read_text()
+    assert "First verdict: DEVIATES" not in summary and "was withdrawn" in summary
+
+
+def test_a_deviates_verdict_after_a_blocked_look_is_not_called_evidence(tmp_path, standins):
+    """Both stacks are noisy on the first 64 items only, and the candidate is wrong on items 0-399: the
+    look at n = 64 deviates but the power gate blocks it, and the look at n = 128 deviates and is allowed."""
+    items = make_single_suite_bank(600)
+    bank = write_bank(items, tmp_path / "bank.jsonl")
+    noisy_ids = {it["id"] for it in items[:64]}
+    wrong_ids = {it["id"] for it in items[:400]}
+    ref = write_noisy_replay(items, tmp_path / "ref.jsonl", correct_output, wrong_output,
+                             lambda it: 0.5 if it["id"] in noisy_ids else 0.0)
+    cand = write_noisy_replay(items, tmp_path / "cand.jsonl",
+                              lambda it: wrong_output(it) if it["id"] in wrong_ids else correct_output(it),
+                              wrong_output, lambda it: 0.5 if it["id"] in noisy_ids else 0.0)
+    _, pa = standins.start(backend=f"replay:{ref}", noise_seed=0)
+    _, pb = standins.start(backend=f"replay:{cand}", noise_seed=1)
+    run_main(["compare", "--ref", url(pa), "--cand", url(pb), "--bank", bank, "--order", "bank", "--tau", "0.08",
+              "--out", tmp_path / "o"])
+    rep = json.loads((tmp_path / "o" / "report.json").read_text())
+    v = rep["verdict"]
+    blocked = [lk["n"] for lk in rep["looks"] if lk["deviates"] and not lk["deviates_allowed_by_power_gate"]]
+    assert v["verdict"] == "DEVIATES" and blocked == [64] and v["first_verdict"]["n"] == 128
+    assert v["pre_gate_deviation"]["n"] == 64 and v["gates"]["deviates_look"]["n"] == 128
+    assert not any("did not let become a verdict" in x for x in rep["limitations"])
+    assert "Evidence of a deviation" not in (tmp_path / "o" / "summary.md").read_text()
+
+
+def test_stop_if_underpowered_keeps_the_evidence_of_the_probe_items(tmp_path, standins, fx):
+    """A candidate wrong on every item: with or without the stop, the looks the probe covers show the deviation."""
+    bad = write_replay(fx["items"], tmp_path / "bad.jsonl", wrong_output)
+    devs = {}
+    for label, extra in (("stop", ["--stop-if-underpowered"]), ("full", [])):
+        _, pa = standins.start(backend=f"replay:{fx['det']}")
+        _, pb = standins.start(backend=f"replay:{bad}")
+        run_main(["compare", "--ref", url(pa), "--cand", url(pb), "--bank", fx["bank"], "--out", tmp_path / label]
+                 + extra)
+        rep = json.loads((tmp_path / label / "report.json").read_text())
+        assert rep["verdict"]["verdict"] == "INCONCLUSIVE_UNDERPOWERED"
+        devs[label] = rep["verdict"]["pre_gate_deviation"]
+        assert "Evidence of a deviation" in (tmp_path / label / "summary.md").read_text()
+    assert devs["stop"] and devs["stop"]["n"] == 32 and devs["stop"]["allowed_by_power_gate"] is False
+    assert {k: devs["stop"][k] for k in ("look", "n", "lower_bounds")} == {
+        k: devs["full"][k] for k in ("look", "n", "lower_bounds")}
+
+
+def test_channel_probe_errors_alone_route_nothing_and_say_so(tmp_path, standins, fx):
+    _, _, rep = run(standins, fx, tmp_path / "errs", fx["det"], fx["det"], ["--tau", "0.1"],
+                    cand_kw={"fail_every": 7})
+    ch = rep["channels"]["candidate"]
+    assert ch["greedy_repeat_identity_rate"] < 1.0 and ch["greedy_repeat_identity_rate_without_errors"] == 1.0
+    flags = rep["coupling"]["flags"]
+    assert not any("routed to the noise floor" in x for x in flags)
+    assert any("errors are not counted as nondeterminism" in x for x in flags)
+    assert rep["noise"]["routing"]["candidate_every_item"] is False
+
+
 # ------------------------------------------------------------------ planted: a replicate silently skipped is refused
 class _DropOne:
     """Wraps an adapter; on the ``nth`` generate call returns one output fewer, without raising."""

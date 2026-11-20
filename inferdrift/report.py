@@ -253,10 +253,18 @@ def _paired_sections(cfg, records, looks, extra, channels, coupling, profiles) -
             f"{k} {v['errored']}/{v['errored_after_retry']}" for k, v in pe.items() if v.get("errored")))
     if px.get("stopped_underpowered"):
         lim.append("stopped after the probe because the plan is underpowered (--stop-if-underpowered)")
-    if px.get("pre_gate_deviation") and not px["pre_gate_deviation"].get("allowed_by_power_gate"):
-        d = px["pre_gate_deviation"]
-        lim.append(f"evidence of a deviation that the power gate did not let become a verdict: at look {d['look']} "
-                   f"(n = {d['n']}) the lower bound exceeded tau for {', '.join(d['capabilities'])}")
+    d = px.get("pre_gate_deviation")
+    a = px.get("allowed_deviation")
+    if px.get("final_verdict") != criteria.DEVIATES:  # a DEVIATES verdict is reported as the verdict, not as evidence
+        if d and not d.get("allowed_by_power_gate"):
+            lim.append(f"evidence of a deviation that the power gate did not let become a verdict: at look "
+                       f"{d['look']} (n = {d['n']}) the lower bound exceeded tau for {', '.join(d['capabilities'])}")
+        if a and px.get("final_verdict") is not None:
+            lim.append(f"evidence of a deviation that the final power gate withdrew: at look {a['look']} (n = {a['n']}) "
+                       f"the lower bound exceeded tau for {', '.join(a['capabilities'])} and the power gate allowed "
+                       f"a DEVIATES verdict (power {a['power_at_planned']:.3f} at the floor known then); the run went "
+                       f"on (no early stop), and at the floor known at the end the plan is underpowered (power "
+                       f"{gate.get('power_at_planned'):.3f}), so the verdict is {px.get('final_verdict')}")
     if fl and fl.get("measured") and fl.get("value", 0) > 0 and st["candidate"]["items"] and st["reference"]["items"]:
         rc = st["candidate"]["repeat_flip_rate"]
         rr = st["reference"]["repeat_flip_rate"]
@@ -432,6 +440,7 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
                       "within_tau": bool(cc.n) and b["upper"] <= cfg.tau,
                       "power_at_planned": (gate.get("power_per_capability") or {}).get(c)}
         rep["verdict"].update({
+            "withdrawn_first_verdict": px.get("withdrawn_first_verdict"),
             "per_capability": per, "items_needed": need.get("items_needed") if gate.get("underpowered") else None,
             "items_needed_note": need.get("note") if gate.get("underpowered") else None,
             "excluded_items": px.get("excluded", 0),
@@ -439,7 +448,7 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
             "gates": {"underpowered": gate.get("underpowered"), "power_at_planned": gate.get("power_at_planned"),
                       "power_requested": cfg.power, "floor_source": gate.get("floor_source"),
                       "floor": (gate.get("floor") or {}).get("value"),
-                      "deviates_look": px.get("pre_gate_deviation"), "all_within_tau": fin.get("all_within"),
+                      "deviates_look": px.get("deviates_look"), "all_within_tau": fin.get("all_within"),
                       "every_planned_item_evaluated": px.get("complete"),
                       "stopped_after_probe_underpowered": px.get("stopped_underpowered")}})
         rep["estimates"].update(sections["estimates_add"])
@@ -536,10 +545,16 @@ def _paired_summary(rep: dict) -> list[str]:
                 lines.append("- No capability is below the power on its own; together they are.")
             lines.append(f"- These items support tau >= {pw.get('smallest_tau_at_planned')} per capability.")
     d = v.get("pre_gate_deviation")
-    if d and not d.get("allowed_by_power_gate"):
-        lines.append(f"- Evidence of a deviation (not a verdict, the plan is underpowered): at look {d['look']} "
+    if d and v["verdict"] != "DEVIATES" and (v["verdict"] is not None or not d.get("allowed_by_power_gate")):
+        why = ("the final power gate withdrew it, the plan is underpowered" if d.get("allowed_by_power_gate")
+               else "the plan is underpowered")
+        lines.append(f"- Evidence of a deviation (not a verdict, {why}): at look {d['look']} "
                      f"(n = {d['n']}) the lower bound exceeded tau for {', '.join(d['capabilities'])} "
                      f"({', '.join(f'{c}: {_f(b)}' for c, b in d['lower_bounds'].items())}).")
+    w = v.get("withdrawn_first_verdict")
+    if w:
+        lines.append(f"- A DEVIATES first verdict at n = {w.get('n')} was withdrawn: the run went on (no early stop), "
+                     f"and at the floor known at the end the plan is underpowered.")
     if isinstance(fl, dict) and fl:
         basis = fl.get("basis") or {}
         items = fl.get("items") or {}
