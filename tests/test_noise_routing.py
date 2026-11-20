@@ -208,6 +208,80 @@ def test_bank_one_item_short_at_a_supplied_noisy_floor(tmp_path, standins, fx):
             assert line["verdict"] != "INCONCLUSIVE_UNDERPOWERED" and line["floor"]["source"] == "supplied"
 
 
+# ------------------------------------------------------------------ the items needed: a number a rerun can use
+def test_a_bank_just_above_the_first_powered_size_gets_a_number_that_passes(tmp_path, standins):
+    """At a floor of 0.02 and tau 0.03, 675 items reach power 0.9 but 683 do not (exact power is a
+    sawtooth).  The number reported for 683 items passes, and it is the number `inferdrift power` gives."""
+    items = make_single_suite_bank(692)
+    _, out = run_main(["power", "--floor", "0.02", "--tau", "0.03"])
+    n_power = json.loads(out)["items_needed"]
+    assert n_power == 692
+    det = write_replay(items, tmp_path / "det.jsonl", correct_output)
+    for n, expect in ((683, "INCONCLUSIVE_UNDERPOWERED"), (692, "EQUIVALENT_WITHIN_TAU")):
+        bank = write_bank(items[:n], tmp_path / f"bank{n}.jsonl")
+        _, pa = standins.start(backend=f"replay:{det}")
+        _, pb = standins.start(backend=f"replay:{det}")
+        _, stdout = run_main(["compare", "--ref", url(pa), "--cand", url(pb), "--bank", bank, "--tau", "0.03",
+                              "--plan-floor", "0.02", "--out", tmp_path / f"o{n}"])
+        line = json.loads(stdout.strip().splitlines()[-1])
+        assert line["verdict"] == expect, n
+        if n == 683:
+            assert line["items_needed"] == n_power and "every size from 692 to 742 was checked" in line[
+                "items_needed_note"]
+
+
+def test_max_items_gets_a_max_items_number_on_the_runs_own_order(tmp_path, standins):
+    """Three capabilities of 700 items, tau 0.01 (597 each at a zero floor): --max-items 1800 leaves one
+    capability short in the seeded order.  The reported number is a --max-items value on that order,
+    and rerunning with it passes."""
+    suites = ("t_a", "t_b", "t_c")
+    items = make_single_suite_bank(2100)
+    for i, it in enumerate(items):
+        it["suite"] = suites[i % 3]
+    bank = write_bank(items, tmp_path / "bank.jsonl")
+    det = write_replay(items, tmp_path / "det.jsonl", correct_output)
+    n = 1800
+    for expect in ("INCONCLUSIVE_UNDERPOWERED", "EQUIVALENT_WITHIN_TAU"):
+        _, pa = standins.start(backend=f"replay:{det}")
+        _, pb = standins.start(backend=f"replay:{det}")
+        _, stdout = run_main(["compare", "--ref", url(pa), "--cand", url(pb), "--bank", bank, "--max-items", str(n),
+                              "--out", tmp_path / f"o{n}"])
+        rep = json.loads((tmp_path / f"o{n}" / "report.json").read_text())
+        assert rep["verdict"]["verdict"] == expect, n
+        if expect == "INCONCLUSIVE_UNDERPOWERED":
+            pw_ = rep["power"]
+            assert pw_["items_needed_basis"] == "max_items" and 1800 < pw_["items_needed"] <= 2100
+            short = pw_["short_capabilities"]
+            assert [s["capability"] for s in short] == ["t_c"] and short[0]["planned"] < 597
+            assert short[0]["needed"] == short[0]["needed_alone"] == 597
+            assert f"--max-items {pw_['items_needed']}" in rep["verdict"]["items_needed_note"]
+            n = pw_["items_needed"]
+
+
+def test_a_one_item_capability_is_named_when_the_search_stops_at_its_cap(tmp_path, standins):
+    items = make_single_suite_bank(1000, "t_big")
+    items[-1]["suite"] = "t_tiny"
+    bank = write_bank(items, tmp_path / "bank.jsonl")
+    det = write_replay(items, tmp_path / "det.jsonl", correct_output)
+    _, pa = standins.start(backend=f"replay:{det}")
+    _, pb = standins.start(backend=f"replay:{det}")
+    code, stdout = run_main(["compare", "--ref", url(pa), "--cand", url(pb), "--bank", bank, "--out", tmp_path / "o",
+                             "--exit-on-verdict"])
+    rep = json.loads((tmp_path / "o" / "report.json").read_text())
+    pw_ = rep["power"]
+    assert code == 12 and pw_["items_needed"] is None and pw_["items_needed_exceeds"] == 20000
+    srch = pw_["items_needed_search"]
+    assert srch["searched_to"] == 20020 and srch["per_capability_at_stop"] == {"t_big": 20000, "t_tiny": 20}
+    assert srch["weakest_at_stop"]["capability"] == "t_tiny"
+    assert [(s["capability"], s["planned"], s["needed_alone"]) for s in pw_["short_capabilities"]] == [
+        ("t_tiny", 1, 597)]
+    line = json.loads(stdout.strip().splitlines()[-1])
+    assert line["items_needed"] is None and "20020 items in this bank's proportions" in line["items_needed_note"]
+    summary = (tmp_path / "o" / "summary.md").read_text()
+    assert "per capability would be needed" not in summary and "t_tiny would have 20 items" in summary
+    assert "t_tiny 1 planned" in summary
+
+
 # ------------------------------------------------------------------ planted: a replicate silently skipped is refused
 class _DropOne:
     """Wraps an adapter; on the ``nth`` generate call returns one output fewer, without raising."""

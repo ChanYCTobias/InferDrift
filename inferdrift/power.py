@@ -33,15 +33,23 @@ over the D values holding all but 1e-12 of the Bin(n, pi) mass, so the reported
 power is a lower bound that is off by at most 1e-12.
 
 Several capabilities are disjoint item sets with independent items, so the
-total power is the product of the per-capability powers.  The power of exact
-tests is not monotone in n (it is a sawtooth): ``items_needed`` returns a
-powered size whose one-smaller size is not, which is what a run needs to know,
-but a smaller powered size may exist below a gap.
+total power is the product of the per-capability powers.
+
+The power of exact tests is not monotone in n (it is a sawtooth): a size can
+reach the power while a few sizes just above it fall slightly below it.
+``threshold`` therefore returns a size N that reaches the power, whose one-smaller
+size does not, and above which every size up to ``check_window(N)`` more (5% of
+N, at least 50 and at most 200) was checked and also reaches it.  When a size in
+that window falls short, the search continues above it.  Sizes beyond the
+checked window are not checked, and a smaller powered size may exist below a
+gap.  The search is deterministic and starts from 0, so ``inferdrift power`` and
+``compare`` report the same number for the same composition and floor.
 """
 
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 from dataclasses import asdict, dataclass
 
 from . import domains
@@ -52,6 +60,7 @@ from .exactstats.paired import DEFAULT_NUISANCE_FRACTION, levels
 EPS = 1e-12
 MAX_ITEMS_PER_CAPABILITY = 100_000
 COMPARE_SEARCH_CAP = 20_000  # per capability, for the search inside every compare (the power command uses 100k)
+WINDOW_MIN, WINDOW_FRACTION, WINDOW_MAX = 50, 0.05, 200  # sizes checked above a found size (see check_window)
 _CP_CACHE: dict = {}
 _POW_CACHE: dict = {}
 
@@ -239,37 +248,114 @@ def allocate(total: int, weights: dict) -> dict:
     return base
 
 
-def items_needed(weights: dict, models: dict, alpha: float, tau: float, power: float, *, above: int = 0,
-                 phi: float = DEFAULT_NUISANCE_FRACTION, cap_per_capability: int = MAX_ITEMS_PER_CAPABILITY) -> dict:
-    """A total item count N > ``above`` whose allocation by ``weights`` reaches ``power``
-    while N - 1 does not (or N - 1 <= ``above``).
+def check_window(n: int) -> int:
+    """How many sizes above a found size N are checked: 5% of N, at least 50 and at most 200."""
+    return min(WINDOW_MAX, max(WINDOW_MIN, math.ceil(WINDOW_FRACTION * n)))
 
-    Doubling from ``above``, bisection, then a short downward scan.  Returns
-    {"items_needed": N | None, "per_capability": {...}, "exceeds": cap or None}."""
-    def is_powered(N: int) -> bool:
-        return powered(allocate(N, weights), models, alpha, tau, power, phi)
 
-    cap_total = int(cap_per_capability / max(weights.values()) * sum(weights.values()))
-    lo = above
-    hi = max(above + 1, 16)
+def _transition(is_powered, start: int, upper: int) -> int | None:
+    """A size N in (start, upper] that is powered while N - 1 is not (or N - 1 == start): doubling
+    from max(start + 1, 16), then bisection.  None when no size on the doubling path, up to and
+    including ``upper``, is powered."""
+    if upper <= start:
+        return None
+    lo = start
+    hi = min(upper, max(start + 1, 16))
     while not is_powered(hi):
-        if hi >= cap_total:
-            return {"items_needed": None, "per_capability": None, "exceeds": cap_per_capability,
-                    "note": f"not powered with {cap_per_capability} items in the largest capability"}
+        if hi >= upper:
+            return None
         lo = hi
-        hi = min(cap_total, hi * 2)
+        hi = min(upper, hi * 2)
     while hi - lo > 1:
         mid = (lo + hi) // 2
         if is_powered(mid):
             hi = mid
         else:
             lo = mid
-    for _ in range(64):
-        if hi - 1 > above and is_powered(hi - 1):
-            hi -= 1
-        else:
-            break
-    return {"items_needed": hi, "per_capability": allocate(hi, weights), "exceeds": None}
+    return hi
+
+
+def threshold(is_powered, *, upper: int, above: int = 0) -> dict:
+    """The size reported as "needed": N > ``above`` that is powered, whose one-smaller size is not (or
+    is ``above``), and such that every size from N to min(upper, N + check_window(N)) is powered.
+    When a size in that window is not powered, the search continues above it.
+
+    Returns {"n": N or None, "checked_up_to": the last size checked to be powered, or None}.
+    Nothing is claimed about sizes above ``checked_up_to``."""
+    start = above
+    while True:
+        n = _transition(is_powered, start, upper)
+        if n is None:
+            return {"n": None, "checked_up_to": None}
+        top = min(upper, n + check_window(n))
+        short = next((k for k in range(n + 1, top + 1) if not is_powered(k)), None)
+        if short is None:
+            return {"n": n, "checked_up_to": top}
+        start = short
+
+
+def items_needed(weights: dict, models: dict, alpha: float, tau: float, power: float, *, above: int = 0,
+                 phi: float = DEFAULT_NUISANCE_FRACTION, cap_per_capability: int = MAX_ITEMS_PER_CAPABILITY) -> dict:
+    """The total item count needed with capabilities in the proportions ``weights`` (``threshold`` over
+    totals, each total allocated by ``allocate``).
+
+    The search starts from 0, so the number does not depend on ``above``; only when that number is
+    at most ``above`` (a size above it dips below the power) does the search continue above ``above``.
+    It stops when the largest capability would exceed ``cap_per_capability``.
+
+    Returns {"items_needed": N | None, "per_capability": allocation at N, "checked_up_to": the last total
+    checked, "exceeds": None}, or, when the search stops at the cap, items_needed None, "exceeds": the cap,
+    and "searched_to", "per_capability_at_stop", "power_at_stop", "largest_capability" and a "note"
+    that states only what was checked."""
+    def is_powered(N: int) -> bool:
+        return powered(allocate(N, weights), models, alpha, tau, power, phi)
+
+    cap_total = int(cap_per_capability / max(weights.values()) * sum(weights.values()))
+    r = threshold(is_powered, upper=cap_total)
+    if r["n"] is not None and r["n"] <= above:
+        r = threshold(is_powered, upper=cap_total, above=above)
+    if r["n"] is None:
+        at_stop = allocate(cap_total, weights)
+        largest = min(at_stop, key=lambda c: (-at_stop[c], str(c)))
+        return {"items_needed": None, "per_capability": None, "exceeds": cap_per_capability, "checked_up_to": None,
+                "searched_to": cap_total, "per_capability_at_stop": at_stop, "largest_capability": largest,
+                "power_at_stop": power_total(at_stop, models, alpha, tau, phi),
+                "note": f"not powered at {cap_total} items in these proportions ({at_stop[largest]} in the largest "
+                        f"capability, {largest}); the search stopped there"}
+    return {"items_needed": r["n"], "per_capability": allocate(r["n"], weights), "exceeds": None,
+            "checked_up_to": r["checked_up_to"]}
+
+
+def items_needed_in_order(order_capabilities: list, models: dict, alpha: float, tau: float, power: float, *,
+                          above: int, phi: float = DEFAULT_NUISANCE_FRACTION) -> dict:
+    """The number of leading items of a fixed item order (a run's own seeded order, cut by
+    ``--max-items``) that is needed: ``threshold`` over prefix lengths in (``above``, len(order)], each
+    prefix tested with its own counts per capability.  The search starts from 0, as in ``items_needed``.
+
+    Returns {"items_needed": N | None, "per_capability": counts of the first N items, "checked_up_to"};
+    items_needed is None when even the whole order is not powered (on the doubling path)."""
+    positions: dict = {}
+    for i, c in enumerate(order_capabilities):
+        positions.setdefault(c, []).append(i)
+
+    def counts(n: int) -> dict:
+        out = {}
+        for c in sorted(positions, key=str):
+            k = bisect_left(positions[c], n)
+            if k:
+                out[c] = k
+        return out
+
+    def is_powered(n: int) -> bool:
+        return powered(counts(n), models, alpha, tau, power, phi)
+
+    total = len(order_capabilities)
+    r = threshold(is_powered, upper=total)
+    if r["n"] is not None and r["n"] <= above:
+        r = threshold(is_powered, upper=total, above=above)
+    if r["n"] is None:
+        return {"items_needed": None, "per_capability": None, "checked_up_to": None}
+    return {"items_needed": r["n"], "per_capability": counts(r["n"]), "checked_up_to": r["checked_up_to"]}
 
 
 def smallest_tau(counts: dict, models_at: dict, alpha: float, power: float,

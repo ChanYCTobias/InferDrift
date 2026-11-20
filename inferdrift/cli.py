@@ -187,6 +187,7 @@ def _cmd_compare_body(a, plan) -> int:
             "first_verdict_elapsed_s": rep["timing"]["first_verdict_elapsed_s"], "cost_usd": rep["cost"]["usd_total"],
             "stopped_by": rep["cost"]["stopped_by"], "report": str(Path(a.out) / "report.json"),
             "criterion": v.get("criterion"), "items_needed": v.get("items_needed"),
+            "items_needed_note": v.get("items_needed_note"),
             "floor": {"value": gates.get("floor"), "source": gates.get("floor_source")} if gates else None,
             "pre_gate_deviation": v.get("pre_gate_deviation")}
     if plan is not None and rep["status"] == "completed":
@@ -336,10 +337,15 @@ def cmd_power(a) -> int:
     out = {"criterion": crit, "tau": tau, "alpha": alpha, "power": target, "floor": floor,
            ("loss" if crit == "net_change" else "excess"): effect, "capability_count": m, "model": model.to_dict(),
            "items_needed": need["items_needed"], "items_needed_per_capability": need["per_capability"],
-           "items_needed_exceeds": need["exceeds"],
+           "items_needed_exceeds": need["exceeds"], "items_needed_checked_up_to": need["checked_up_to"],
            "method": "exact pass probability of the paired bound (the bound compare uses), product over equal "
-                     "capabilities; items_needed is a powered total whose one-smaller total is not (exact power is "
-                     "not monotone in n)"}
+                     "capabilities; items_needed is a total that reaches the power while one fewer does not, and "
+                     "every total from it to items_needed_checked_up_to was checked to reach it too (5% more, at "
+                     "least 50 and at most 200); exact power is not monotone in n, and larger totals were not "
+                     "checked"}
+    if need["items_needed"] is None:
+        out["items_needed_search_stopped_at"] = need["searched_to"]
+        out["items_needed_note"] = need["note"]
     if items is not None:
         counts = pw.allocate(items, weights)
         out["items"] = items
@@ -458,7 +464,8 @@ def build_parser() -> argparse.ArgumentParser:
                    "net accuracy loss per capability against the noise floor; harmful_excess = excess harmful-flip "
                    "rate over the reference's replicate floor; harmful_abs = the 0.1.0 rule, for deterministic stacks")
     c.add_argument("--power", default="0.9", help="power the plan must have, in (0, 1); below it the verdict is "
-                   "INCONCLUSIVE_UNDERPOWERED with the number of items needed")
+                   "INCONCLUSIVE_UNDERPOWERED with the number of items needed, or, when the search passes 20000 "
+                   "items in the largest capability, the size where it stopped")
     c.add_argument("--floor-probe-items", default=None, help="items run twice on both stacks to measure the noise "
                    "floor (default 64; 0 turns the probe off)")
     c.add_argument("--plan-floor", default=None, help="a floor in [0, 1] measured beforehand, used by the power gate "

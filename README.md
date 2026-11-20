@@ -36,7 +36,9 @@ You choose what the verdict certifies:
 
 Each gives one verdict at the tolerance you choose, from exact bounds. If the
 item bank is too small for that tolerance, the verdict says so and states how
-many items would be needed, instead of a pass or a fail.
+many items would be needed (or, past the search's limit of 20,000 items in the
+largest capability, the size at which the search stopped), instead of a pass or
+a fail.
 
 Grading uses exact inheritance. When the candidate's output is byte-identical to
 the reference output, a deterministic grader would give it the same grade, so
@@ -142,9 +144,9 @@ unavailable; see below). The stand-ins agree on every item, but the default
 tolerance is one point of net accuracy per capability, and the core bank's five
 capabilities are too small for that: with no noise at all, the exact bound needs
 597 items per capability, and the smallest capability has 30. The JSON line and
-`summary.md` say how many items would do (9,944 in the bank's proportions, in our
-run) and which tolerance this bank supports (about 18 points per capability,
-limited by the 30 code items). Two variations:
+`summary.md` give the number of items needed (9,944 in the bank's proportions, in
+our run), and `summary.md` also gives the tolerance this bank supports (about 18
+points per capability, limited by the 30 code items). Two variations:
 
 ```bash
 # one capability with a tolerance its 140 items support: EQUIVALENT_WITHIN_TAU
@@ -303,9 +305,20 @@ reference's noise floor (`harmful_excess`), or the harmful-flip rate
   the statistic was above tau, and the plan had the requested power.
 - `INCONCLUSIVE_UNDERPOWERED`: the planned items are too few for tau at the
   requested power, given the measured noise floor. This is never a pass or a
-  fail. The report gives the number of items that would do, which capabilities
-  are short, and the smallest tolerance the bank supports. With no noise at all
-  and alpha = 0.05, power 0.9, the default criterion needs 597 items per
+  fail. The report gives the number of items needed, which capabilities are
+  short, and the smallest tolerance the bank supports. The number is searched on
+  what the run tested: when `--max-items` cut the bank, it is a `--max-items`
+  value for the same bank, seed and item order; otherwise it is a bank size in
+  the bank's proportions. It reaches the requested power while one item fewer
+  does not, and every size up to 5% above it (at least 50 and at most 200 sizes)
+  was checked to reach it as well. Exact power is not monotone in the number of
+  items, so larger sizes were not checked. If the search reaches 20,000 items in
+  the largest capability without finding enough, the report gives the size where
+  it stopped and the power there, instead of a number. A capability is short
+  when its own power at its planned count is below `--power`; the report gives
+  the number it needs on its own (what `inferdrift power` gives at its floor),
+  and together with other short capabilities it can need more. With no noise at
+  all and alpha = 0.05, power 0.9, the default criterion needs 597 items per
   capability for tau = 0.01, 297 for 0.02 and 117 for 0.05; noise raises these
   numbers (`inferdrift power`). If the bounds already pointed to a deviation,
   the report says so as evidence, not as a verdict.

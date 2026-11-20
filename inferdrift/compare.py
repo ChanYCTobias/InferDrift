@@ -665,7 +665,8 @@ def run_compare(cfg: CompareConfig) -> dict:
             event("first_verdict", **first_verdict)
     elif state["status"] == "completed":
         try:
-            verdict, bound = _final_paired(cfg, plan, n_max, planned_caps, bank_caps, records, looks_out, state, px)
+            verdict, bound = _final_paired(cfg, plan, n_max, planned_caps, bank_caps, records, looks_out, state, px,
+                                           order_caps=[it["suite"] for it in order])
         except RefusedError as e:  # a missing second run found at the end: refused, never evaluated
             state["status"] = "refused"
             state["refusal"] = {"code": e.code, "message": scrub_text(str(e)), "plan": None}
@@ -1003,9 +1004,14 @@ def _paired_chunks(cfg, plan, order, probe_n, boundaries, pending, run_pass, *, 
 
 
 def evaluate_gate(cfg, records: list[dict], planned_caps: Counter, bank_caps: Counter, ref_all: bool,
-                  cand_all: bool, *, final: bool) -> dict:
+                  cand_all: bool, *, final: bool, order_caps: list | None = None) -> dict:
     """The power gate: is the plan powered at the floor known so far?  With ``final``,
-    also the items needed and the smallest tolerance the planned items support."""
+    also the items needed and the smallest tolerance the planned items support.
+
+    The items needed are searched on the composition the gate tests: when ``--max-items`` cut the
+    run's own seeded order (``order_caps``, the capability of each item in that order), as a
+    ``--max-items`` value on that order; otherwise, or when even the whole order is not enough, as
+    a bank size in the bank's proportions."""
     crit, alpha, tau, target = cfg.criterion, cfg.alpha, cfg.tau, cfg.power
     st_r = noise.pair_stats(records, "ref", "rep", "ref_grade", "rep_grade", alpha)
     st_c = noise.pair_stats(records, "cand", "cand_rep", "cand_grade", "cand_rep_grade", alpha)
@@ -1037,29 +1043,69 @@ def evaluate_gate(cfg, records: list[dict], planned_caps: Counter, bank_caps: Co
         return out
     weights = {c: bank_caps[c] for c in caps_all if bank_caps[c] > 0} or dict(planned)
     n_planned = sum(planned.values())
+    bank_n = sum(weights.values())
+    cap = pw.COMPARE_SEARCH_CAP
+    at = "the measured floor" if source == "measured" else "the supplied floor (--plan-floor)"
     if underpowered and source != "unmeasured":
-        need = pw.items_needed(weights, {c: models[c] for c in weights}, alpha, tau, target, above=n_planned,
-                               cap_per_capability=pw.COMPARE_SEARCH_CAP)
+        need = None
+        if order_caps is not None and n_planned < len(order_caps):
+            r = pw.items_needed_in_order(order_caps, models, alpha, tau, target, above=n_planned)
+            if r["items_needed"] is not None:
+                n_, top = r["items_needed"], r["checked_up_to"]
+                p_ = pw.power_total(r["per_capability"], models, alpha, tau)
+                need = dict(r, exceeds=None, basis="max_items", power_at_items_needed=p_, order_items=len(order_caps),
+                            note=f"--max-items {n_} (this bank, seed and item order) reaches power {p_:.3f} at {at}; "
+                                 f"--max-items {n_ - 1} does not; every value from {n_} to {top} was checked"
+                                 + (" (the whole bank)" if top == len(order_caps) else ""))
+        if need is None:
+            whole_short = order_caps is not None and n_planned < len(order_caps)
+            need = pw.items_needed(weights, {c: models[c] for c in weights}, alpha, tau, target,
+                                   above=max(n_planned, bank_n), cap_per_capability=cap)
+            need["basis"] = "bank_proportions"
+            need["whole_bank_not_enough"] = whole_short
+            lead = f"the whole bank ({bank_n} items) is not enough; " if whole_short else ""
+            if need["items_needed"] is not None:
+                n_, top = need["items_needed"], need["checked_up_to"]
+                p_ = pw.power_total(need["per_capability"], {c: models[c] for c in weights}, alpha, tau)
+                need["power_at_items_needed"] = p_
+                need["note"] = (f"{lead}{n_} items in this bank's proportions reach power {p_:.3f} at {at}; {n_ - 1} "
+                                f"do not; every size from {n_} to {top} was checked")
+            else:
+                stop = need["per_capability_at_stop"]
+                powers = {c: pw.pass_probability(stop[c], models[c], alpha, tau) for c in stop}
+                weak = min(powers, key=lambda c: (powers[c], str(c)))
+                need["weakest_at_stop"] = {"capability": weak, "items": stop[weak], "power": powers[weak]}
+                need["note"] = (f"{lead}{need['searched_to']} items in this bank's proportions ({stop[need['largest_capability']]} "
+                                f"in the largest capability, {need['largest_capability']}) would still not reach the "
+                                f"power (power {need['power_at_stop']:.3f}) at {at}; the search stopped there; at that "
+                                f"size {weak} would have {stop[weak]} items (power {powers[weak]:.3f})")
     elif source == "unmeasured":
         zero = {c: pw.model_for(crit, 0.0) for c in weights}
-        lb = pw.items_needed(weights, zero, alpha, tau, target, above=0, cap_per_capability=pw.COMPARE_SEARCH_CAP)
-        need = {"items_needed": None, "per_capability": None, "exceeds": None,
+        lb = pw.items_needed(weights, zero, alpha, tau, target, above=0, cap_per_capability=cap)
+        need = {"items_needed": None, "per_capability": None, "exceeds": None, "basis": None,
                 "lower_bound": lb["items_needed"],
                 "note": "the floor was not measured; the zero-floor size is only a lower bound and no verdict is "
                         "issued on it"}
     else:
-        need = {"items_needed": None, "per_capability": None, "exceeds": None}
+        need = {"items_needed": None, "per_capability": None, "exceeds": None, "basis": None}
     short = []
-    if need.get("per_capability"):
-        short = [{"capability": c, "planned": planned.get(c, 0), "needed": need["per_capability"][c]}
-                 for c in sorted(need["per_capability"]) if need["per_capability"][c] > planned.get(c, 0)]
+    if underpowered and source != "unmeasured":
+        at_need = need.get("per_capability") or {}
+        at_stop = need.get("per_capability_at_stop") or {}
+        for c in sorted(planned):
+            if per_cap_power[c] < target:  # below the power on its own, so the plan cannot reach it
+                alone = pw.items_needed({c: 1}, {c: models[c]}, alpha, tau, target, cap_per_capability=cap)
+                short.append({"capability": c, "planned": planned[c], "power_at_planned": per_cap_power[c],
+                              "needed": at_need.get(c), "at_search_stop": at_stop.get(c),
+                              "needed_alone": alone["items_needed"], "needed_alone_exceeds": alone["exceeds"]})
     out["items_needed"] = need
     out["short_capabilities"] = short
     out["smallest_tau_at_planned"] = pw.smallest_tau(planned, {c: models[c] for c in planned}, alpha, target)
     return out
 
 
-def _final_paired(cfg, plan, n_max, planned_caps, bank_caps, records, looks_out, state, px) -> tuple:
+def _final_paired(cfg, plan, n_max, planned_caps, bank_caps, records, looks_out, state, px,
+                  order_caps: list | None = None) -> tuple:
     """Verdict of a completed paired run, and the binding capability's bound."""
     missing = [r["id"] for r in records if (r.get("rep_required") and "rep" not in r)
                or (r.get("cand_rep_required") and "cand_rep" not in r)]
@@ -1073,7 +1119,8 @@ def _final_paired(cfg, plan, n_max, planned_caps, bank_caps, records, looks_out,
         and not px["stopped_underpowered"]
     px["complete"] = complete
     all_within, ubs = criteria.final_check(run_counts, cfg.alpha, cfg.tau)
-    gate = evaluate_gate(cfg, records, planned_caps, bank_caps, px["ref_all"], px["cand_all"], final=True)
+    gate = evaluate_gate(cfg, records, planned_caps, bank_caps, px["ref_all"], px["cand_all"], final=True,
+                         order_caps=order_caps)
     px["gate"] = gate
     any_dev = any(lk["deviates"] for lk in looks_out)
     verdict = criteria.decide(underpowered=gate["underpowered"], deviates=any_dev, complete=complete,

@@ -91,3 +91,44 @@ def test_models_refuse_impossible_parameters():
         pw.net_change_model(0.1, -0.2)
     with pytest.raises(BadInputError):
         pw.harmful_excess_model(1.5)
+
+
+def test_a_size_with_unpowered_sizes_just_above_it_is_not_reported():
+    """Exact power is a sawtooth: at floor 0.02 and tau 0.03, 675 items reach power 0.9 while 681-684
+    and 691 fall below it again; the reported number is above all of them."""
+    m = {"a": pw.net_change_model(0.02)}
+    assert pw.powered({"a": 675}, m, 0.05, 0.03, 0.9) and not pw.powered({"a": 683}, m, 0.05, 0.03, 0.9)
+    r = pw.items_needed({"a": 1}, m, 0.05, 0.03, 0.9)
+    assert r["items_needed"] == 692 and r["checked_up_to"] == 742
+
+
+@pytest.mark.parametrize("crit,floor,tau,m", [("net_change", 0.02, 0.03, 1), ("net_change", 0.03, 0.02, 1),
+                                              ("harmful_excess", 0.1, 0.05, 1), ("net_change", 0.05, 0.05, 3),
+                                              ("net_change", 0.0, 0.05, 2)])
+def test_items_needed_is_checked_above_and_does_not_depend_on_where_the_search_starts(crit, floor, tau, m):
+    weights = {f"c{i}": 1 for i in range(m)}
+    models = {c: pw.model_for(crit, floor) for c in weights}
+    r = pw.items_needed(weights, models, 0.05, tau, 0.9)
+    n, top = r["items_needed"], r["checked_up_to"]
+    assert top == n + pw.check_window(n) and pw.check_window(n) >= 50
+    assert all(pw.powered(pw.allocate(k, weights), models, 0.05, tau, 0.9) for k in range(n, top + 1))
+    assert not pw.powered(pw.allocate(n - 1, weights), models, 0.05, tau, 0.9)
+    for above in (n - 1, n - 10, n // 2, 1):  # compare searches above its planned count
+        assert pw.items_needed(weights, models, 0.05, tau, 0.9, above=above)["items_needed"] == n, above
+
+
+def test_a_capped_search_states_where_it_stopped():
+    models = {c: pw.net_change_model(0.0) for c in ("big", "tiny")}
+    r = pw.items_needed({"big": 999, "tiny": 1}, models, 0.05, 0.01, 0.9, cap_per_capability=20_000)
+    assert r["items_needed"] is None and r["exceeds"] == 20_000 and r["searched_to"] == 20_020
+    assert r["per_capability_at_stop"] == {"big": 20_000, "tiny": 20} and r["largest_capability"] == "big"
+    assert r["power_at_stop"] == 0.0 and r["note"].startswith("not powered at 20020 items")
+
+
+def test_items_needed_in_order_uses_the_counts_of_the_order_itself():
+    order = ["a"] * 150 + ["b"] * 150 + ["c"] * 150
+    models = {c: pw.net_change_model(0.0) for c in "abc"}
+    r = pw.items_needed_in_order(order, models, 0.05, 0.05, 0.9, above=340)
+    assert r["items_needed"] == 417 and r["per_capability"] == {"a": 150, "b": 150, "c": 117}
+    assert r["checked_up_to"] == 450  # the check reaches the end of the order
+    assert pw.items_needed_in_order(order[:400], models, 0.05, 0.05, 0.9, above=340)["items_needed"] is None

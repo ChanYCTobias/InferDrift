@@ -195,15 +195,26 @@ def _paired_sections(cfg, records, looks, extra, channels, coupling, profiles) -
         "underpowered": gate.get("underpowered"), "floor_source": gate.get("floor_source"),
         "floors": gate.get("floors"), "items_needed": need.get("items_needed"),
         "items_needed_per_capability": need.get("per_capability"), "items_needed_exceeds": need.get("exceeds"),
-        "items_needed_lower_bound": need.get("lower_bound"), "short_capabilities": gate.get("short_capabilities"),
+        "items_needed_lower_bound": need.get("lower_bound"), "items_needed_basis": need.get("basis"),
+        "items_needed_checked_up_to": need.get("checked_up_to"), "items_needed_note": need.get("note"),
+        "items_needed_search": need or None, "short_capabilities": gate.get("short_capabilities"),
         "smallest_tau_at_planned": gate.get("smallest_tau_at_planned"),
         "method": "exact pass probability of the bound the verdict uses, summed over the discordant count "
-                  "(truncated at 1e-12 of mass); product over capabilities; items_needed is a powered total whose "
-                  "one-smaller total is not, with capabilities in the bank's proportions",
+                  "(truncated at 1e-12 of mass); product over capabilities. items_needed is a size that reaches "
+                  "the power while one fewer does not, and every size from it to items_needed_checked_up_to was "
+                  "checked to reach it too (5% more, at least 50 and at most 200 sizes); larger sizes were not "
+                  "checked. It is searched on the composition the gate tests: as a --max-items value on this run's "
+                  "own item order when --max-items cut the bank (basis max_items), otherwise as a bank size in the "
+                  "bank's proportions (basis bank_proportions). When that search reaches 20000 items in the largest "
+                  "capability, items_needed is null and items_needed_search states the size it stopped at and the "
+                  "power there. short_capabilities are the capabilities whose own power at the planned count is "
+                  "below the requested power; needed_alone is the number the same search gives for that "
+                  "capability alone (the number `inferdrift power` gives at its floor); jointly more can be needed",
         "assumptions": ["items are independent draws; capabilities are disjoint", "the floor is a point estimate "
                         "from this run (or the supplied --plan-floor); per capability where a stack ran twice on "
-                        "every item", "the power of exact tests is not monotone in n: a smaller powered size may "
-                        "exist below a gap"],
+                        "every item", "the power of exact tests is not monotone in n (a sawtooth): sizes above "
+                        "items_needed_checked_up_to were not checked, and a smaller powered size may exist below a "
+                        "gap"],
     }
     # deterministic mode
     det = {}
@@ -223,9 +234,11 @@ def _paired_sections(cfg, records, looks, extra, channels, coupling, profiles) -
             lim.append("the noise floor was not measured (no item was run twice): no pass or fail is issued; "
                        "run the probe (--floor-probe-items) or pass --plan-floor")
         else:
+            src = "the measured floor" if gate.get("floor_source") == "measured" else \
+                "the supplied floor (--plan-floor)"
             lim.append(f"the planned items have power {gate.get('power_at_planned'):.3f} < {cfg.power} for tau = "
-                       f"{tau} at the measured floor: the verdict is INCONCLUSIVE_UNDERPOWERED, never a pass or a "
-                       f"fail" + (f"; about {need['items_needed']} items would do" if need.get("items_needed") else ""))
+                       f"{tau} at {src}: the verdict is INCONCLUSIVE_UNDERPOWERED, never a pass or a "
+                       f"fail" + (f"; {need['note']}" if need.get("note") else ""))
     if gate.get("floor_source") == "supplied" and not (fl or {}).get("measured"):
         lim.append("the power gate used the supplied --plan-floor; nothing in this run measured the floor (no item "
                    "was run twice), so the run could not check it")
@@ -420,6 +433,7 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
                       "power_at_planned": (gate.get("power_per_capability") or {}).get(c)}
         rep["verdict"].update({
             "per_capability": per, "items_needed": need.get("items_needed") if gate.get("underpowered") else None,
+            "items_needed_note": need.get("note") if gate.get("underpowered") else None,
             "excluded_items": px.get("excluded", 0),
             "pre_gate_deviation": px.get("pre_gate_deviation"),
             "gates": {"underpowered": gate.get("underpowered"), "power_at_planned": gate.get("power_at_planned"),
@@ -480,6 +494,20 @@ def _f(x, digits: int = 4) -> str:
     return "n/a" if x is None else f"{x:.{digits}f}"
 
 
+def _short_text(s: dict) -> str:
+    """One capability that is below the power on its own, for summary.md."""
+    out = f"{s['capability']} {s['planned']} planned (power {_f(s.get('power_at_planned'), 3)})"
+    if s.get("needed") is not None:
+        out += f", {s['needed']} at the number above"
+    elif s.get("at_search_stop") is not None:
+        out += f", {s['at_search_stop']} where the search stopped"
+    if s.get("needed_alone") is not None:
+        out += f"; on its own it reaches the power at {s['needed_alone']} items"
+    elif s.get("needed_alone_exceeds"):
+        out += f"; on its own it does not reach the power even at {s['needed_alone_exceeds']} items"
+    return out
+
+
 def _paired_summary(rep: dict) -> list[str]:
     v = rep["verdict"]
     est = rep["estimates"]
@@ -494,19 +522,19 @@ def _paired_summary(rep: dict) -> list[str]:
             "not offset harmful ones")
     lines.append(f"- Criterion: `{crit}`: {what}. Power requested: {pw.get('power_requested')}.")
     if v["verdict"] == "INCONCLUSIVE_UNDERPOWERED":
-        if pw.get("items_needed"):
-            short = ", ".join(f"{s['capability']} {s['planned']} -> {s['needed']}" for s in
-                              (pw.get("short_capabilities") or []))
-            lines.append(f"- Underpowered: the planned {pw.get('planned_items')} items have power "
-                         f"{_f(pw.get('power_at_planned'), 3)} for tau = {v['tau']}; about {pw['items_needed']} items "
-                         f"in the bank's proportions would do" + (f" (capabilities short: {short})" if short else "")
-                         + f". These items support tau >= {pw.get('smallest_tau_at_planned')} per capability.")
-        elif pw.get("items_needed_exceeds"):
-            lines.append(f"- Underpowered: more than {pw['items_needed_exceeds']} items per capability would be "
-                         f"needed. These items support tau >= {pw.get('smallest_tau_at_planned')} per capability.")
-        elif pw.get("floor_source") == "unmeasured":
+        if pw.get("floor_source") == "unmeasured":
             lines.append(f"- No verdict: the noise floor was not measured; at least {pw.get('items_needed_lower_bound')}"
                          f" items would be needed even with no noise.")
+        elif pw.get("items_needed_note"):
+            lines.append(f"- Underpowered: the planned {pw.get('planned_items')} items have power "
+                         f"{_f(pw.get('power_at_planned'), 3)} for tau = {v['tau']}; {pw['items_needed_note']}.")
+            short = pw.get("short_capabilities") or []
+            if short:
+                lines.append("- Capabilities below the power on their own: " + "; ".join(_short_text(s) for s in short)
+                             + ".")
+            else:
+                lines.append("- No capability is below the power on its own; together they are.")
+            lines.append(f"- These items support tau >= {pw.get('smallest_tau_at_planned')} per capability.")
     d = v.get("pre_gate_deviation")
     if d and not d.get("allowed_by_power_gate"):
         lines.append(f"- Evidence of a deviation (not a verdict, the plan is underpowered): at look {d['look']} "
