@@ -51,5 +51,18 @@ jobs:
           sleep 1
           inferdrift compare --ref http://127.0.0.1:8099/v1 --cand http://127.0.0.1:8100/v1 --out demo
           cat demo/summary.md
+          inferdrift compare --ref http://127.0.0.1:8099/v1 --cand http://127.0.0.1:8100/v1 \
+            --bank math_short --tau 0.05 --out demo_math
+          inferdrift compare --ref http://127.0.0.1:8099/v1 --cand http://127.0.0.1:8100/v1 \
+            --criterion harmful_abs --out demo_abs
           kill $REF_PID $CAND_PID
-          python -c "import json; v = json.load(open('demo/report.json'))['verdict']['verdict']; assert v == 'EQUIVALENT_WITHIN_TAU', v"
+          inferdrift power --tau 0.05
+          python - <<'EOF'
+          import json
+          v = json.load(open("demo/report.json"))["verdict"]
+          assert v["verdict"] == "INCONCLUSIVE_UNDERPOWERED", v["verdict"]
+          assert isinstance(v["items_needed"], int) and v["items_needed"] > v["n"], v["items_needed"]
+          for d in ("demo_math", "demo_abs"):
+              got = json.load(open(f"{d}/report.json"))["verdict"]["verdict"]
+              assert got == "EQUIVALENT_WITHIN_TAU", (d, got)
+          EOF

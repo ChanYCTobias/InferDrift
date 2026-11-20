@@ -17,22 +17,39 @@ wrong, and an aggregate benchmark score can hide that: a few answers that get
 worse can be cancelled out by a few that get better.
 
 InferDrift runs both stacks on the same items and couples their decoding (for
-example, greedy decoding on both). It counts **harmful flips**: items the
-reference stack gets right and the candidate stack gets wrong. It then reports
-exact one-sided bounds on the harmful-flip rate and gives one verdict at the
-tolerance you choose.
+example, greedy decoding on both). It counts **harmful flips** (items the
+reference stack gets right and the candidate stack gets wrong) and **helpful
+flips** (the reverse). An engine can also disagree with itself: the same request
+can give a different answer on a second run. InferDrift measures that **noise
+floor** for each stack, by running items twice, and judges the change against it.
+
+You choose what the verdict certifies:
+
+- **`net_change`** (the default) bounds the net accuracy change of the
+  candidate, per capability (the item's suite). Inside one capability, helpful
+  flips offset harmful ones, so this is the "is it worse on balance" question.
+- **`harmful_excess`** bounds the rate of harmful flips beyond the reference's
+  own noise floor. Helpful flips do not offset harmful ones.
+- **`harmful_abs`** is the release 0.1.0 rule: it bounds the harmful-flip rate
+  itself. Use it only for stacks that are deterministic: on a noisy engine it
+  counts the engine's own noise as harm.
+
+Each gives one verdict at the tolerance you choose, from exact bounds. If the
+item bank is too small for that tolerance, the verdict says so and states how
+many items would be needed, instead of a pass or a fail.
 
 Grading uses exact inheritance. When the candidate's output is byte-identical to
 the reference output, a deterministic grader would give it the same grade, so
 the grade is reused instead of recomputed. A seeded random share of the reused
-grades is still re-checked. Every reference output is still graded once. For the
-candidate, grading cost therefore grows with the number of outputs that differ,
-plus the audit share (by default about 5% of the reused grades), not with the
-full size of the item bank.
+grades is still re-checked. Every reference output is graded once per run, or,
+with the reference cache (`--ref-cache`), once across runs, again with a seeded
+share re-checked. For the candidate, grading cost therefore grows with the
+number of outputs that differ, plus the audit share (by default about 5% of the
+reused grades), not with the full size of the item bank.
 
 ## Status
 
-**This is an early preview, version 0.1.0.dev0.** Interfaces, report fields and
+**This is an early preview, version 0.2.0.dev0.** Interfaces, report fields and
 defaults may change without notice. It is not published on the Python package
 index; install it from source (see below).
 
@@ -42,15 +59,20 @@ index; install it from source (see below).
   the llama.cpp server was a CPU-only build. No GPU-served stack has yet been
   compared end to end. No other hardware, driver or operating system has been
   tested.
-- **Known limitation, being fixed.** Under the current verdict rule, a noisy
-  engine can make a harmless change look harmful. With greedy decoding, an engine
-  that is not deterministic from run to run produces flips of its own, and the
-  verdict counts them as harmful flips caused by the change. The report flags
-  engines whose repeated greedy outputs differ, but the verdict does not subtract
-  that noise. We are changing the default criterion to the excess harmful-flip
-  rate over a measured noise floor, plus the net accuracy change. That change has
-  not shipped yet. Until it does, treat a `DEVIATES` verdict on a stack flagged
-  as non-deterministic with caution.
+- **New in 0.2 (not yet validated on a live engine).** In 0.1.0 a noisy engine
+  could make a harmless change look harmful: an engine that is not deterministic
+  from run to run produces flips of its own, and the verdict counted them as
+  harm. Version 0.2 measures each stack's noise floor, runs the reference twice
+  when that floor is not zero, and changes the default criterion to the net
+  accuracy change per capability (see "How to read a verdict"). It also adds a
+  power check (`INCONCLUSIVE_UNDERPOWERED` with the number of items needed),
+  deterministic-mode reporting, a reference cache and the `inferdrift power`
+  command. What is validated so far: all of this is tested offline against the
+  local stand-in only, including its emulation of noisy and deterministic
+  engines. It has not yet been run against a live vLLM, llama.cpp or SGLang
+  server, or on a GPU. The deterministic-mode advice is generic: it names no
+  engine-specific setting yet. On a deterministic stack, `--criterion
+  harmful_abs` gives the 0.1.0 verdicts.
 - **Experimental: `compare --plan`.** The requalification plan feature
   (`inferdrift/requalify.py`, `inferdrift/plan_audit.py`,
   `inferdrift/plan_stats.py`) did not meet its validation bar. This release
@@ -67,8 +89,10 @@ How each adapter has been exercised so far:
 | SGLang | implemented; exercised only against the stand-in's emulation of its protocol |
 
 The statistical method combines standard, well-known pieces: paired
-comparison, Clopper-Pearson bounds and a Bonferroni split over planned looks.
-No claim of novelty or priority is made.
+comparison, Clopper-Pearson bounds, an exact paired bound built from them,
+McNemar-style conditioning on the discordant items, a Bonferroni split over
+capabilities and planned looks, and an intersection-union rule for the pass. No
+claim of novelty or priority is made.
 
 ## Install from source
 
@@ -112,17 +136,41 @@ cat demo/summary.md
 kill $REF_PID $CAND_PID
 ```
 
-`compare` prints one JSON line. Here the verdict is `EQUIVALENT_WITHIN_TAU` on
-500 items (470 if the code suite is skipped because user namespaces are
-unavailable; see below). The run directory `demo/` holds `report.json` (the full
-report), `items.jsonl` (one record per item), `events.jsonl` and `summary.md`.
+`compare` prints one JSON line. Here the verdict is `INCONCLUSIVE_UNDERPOWERED`
+on 500 items (470 if the code suite is skipped because user namespaces are
+unavailable; see below). The stand-ins agree on every item, but the default
+tolerance is one point of net accuracy per capability, and the core bank's five
+capabilities are too small for that: with no noise at all, the exact bound needs
+597 items per capability, and the smallest capability has 30. The JSON line and
+`summary.md` say how many items would do (9,944 in the bank's proportions, in our
+run) and which tolerance this bank supports (about 18 points per capability,
+limited by the 30 code items). Two variations:
+
+```bash
+# one capability with a tolerance its 140 items support: EQUIVALENT_WITHIN_TAU
+inferdrift compare --ref http://127.0.0.1:8099/v1 --cand http://127.0.0.1:8100/v1 \
+  --bank math_short --tau 0.05 --out demo_math
+# the 0.1.0 rule (harmful-flip rate, deterministic stacks): EQUIVALENT_WITHIN_TAU
+inferdrift compare --ref http://127.0.0.1:8099/v1 --cand http://127.0.0.1:8100/v1 \
+  --criterion harmful_abs --out demo_abs
+```
+
+`inferdrift power --tau 0.05` prints the planner's number for one capability
+with no noise (117 items); add `--floor 0.03` for an engine whose answers flip
+on 3% of repeated requests.
+
+The run directory `demo/` holds `report.json` (the full report), `items.jsonl`
+(one record per item), `events.jsonl` and `summary.md`.
 
 The stand-in can inject faults, so you can see how a report flags them. For
 example, start the candidate with `--nondeterministic 0.3` (it perturbs greedy
-outputs at random), or start it with `--ignore-seed` and run
-`compare --decode sample --seed 3`, then compare the reports. The test suite in
-`tests/` builds replay files with known answers and shows `DEVIATES` verdicts as
-well.
+outputs at random, so both stacks are then run twice on every item), or start it
+with `--ignore-seed` and run `compare --decode sample --seed 3`, then compare the
+reports. A replay file can also emulate a noisy engine: a line with `alt` and
+`flip` serves its alternative answer with that probability (see
+`inferdrift/standin.py`; `--noise-seed` picks the engine's noise). The test
+suite in `tests/` builds replay files with known answers and shows `DEVIATES`
+verdicts as well.
 
 ## Commands
 
@@ -132,11 +180,14 @@ well.
 | `inferdrift inspect TARGET` | passive profile of a Hub repository, a local model directory, a local GGUF file, or an endpoint: JSON, safetensors headers and GGUF metadata only; code, hooks and pickles are listed, never executed | for Hub repositories and remote endpoints |
 | `inferdrift channels SPEC` | detects prompt log-probabilities, top-k log-probabilities, seed honouring, greedy repeat identity, usage reporting and max-token honouring | only if the spec needs it |
 | `inferdrift plan-downloads --ref SPEC [--cand SPEC]` | shows, or refuses, the downloads a comparison would need | yes (Hub listing) |
-| `inferdrift standin --port PORT` | local metered stand-in endpoint for testing caps and adapters, with fault injection (`--ignore-seed`, `--no-logprobs`, `--truncate-frac`, `--fail-every`, `--bad-usage`, `--nondeterministic`, ...) | no |
+| `inferdrift power --tau T [--floor F]` | items needed for a tolerance at a noise floor, from the exact bound `compare` uses (also `--criterion`, `--alpha`, `--power`, `--capability-count`, `--items`) | no |
+| `inferdrift standin --port PORT` | local metered stand-in endpoint for testing caps and adapters, with fault injection (`--ignore-seed`, `--no-logprobs`, `--truncate-frac`, `--fail-every`, `--bad-usage`, `--nondeterministic`, ...) and a replay noise model (`--noise-seed`) | no |
 | `inferdrift banks` | lists the built-in item banks | no |
 | `inferdrift profile-diff A B` | diffs two stack profiles or two reports | no |
 
-Run `inferdrift COMMAND --help` for every option.
+Run `inferdrift COMMAND --help` for every option. Options of `compare` added in
+0.2: `--criterion`, `--power`, `--floor-probe-items`, `--plan-floor`,
+`--replicate`, `--ref-cache` and `--stop-if-underpowered`.
 
 A stack spec is one of:
 
@@ -148,6 +199,10 @@ A stack spec is one of:
 
 For the tool-calling items, start vLLM with `--enable-auto-tool-choice` and a
 `--tool-call-parser` that fits the model.
+
+If you know whether an endpoint's engine runs in a deterministic or
+batch-invariant mode, add `deterministic=on` (or `off`) to its spec; the report
+states it as declared and flags a declared `on` whose outputs differ between runs.
 
 API keys are never part of a spec. Put the key in an environment variable and
 pass that variable's name, for example `--cand-api-key-env MY_KEY`.
@@ -182,18 +237,37 @@ instead.
 2. **Detects channels and couples decoding.** Greedy decoding is coupled by
    construction. Seeded sampling uses shared Gumbel noise when both stacks run
    in-process. Without verified shared randomness, for example an endpoint that
-   ignores the seed, it samples independently, says so, and bounds the excess
-   harmful-flip rate over a second, independent reference run, with wider
-   bounds.
-3. **Evaluates items sequentially.** Items run in a seeded random order. The plan
-   has looks at n = 32, 64, 128, ... and at n_max. `DEVIATES` is tested at every
-   look at alpha/K, where K is the number of looks, and the run stops at the
-   first one. `EQUIVALENT_WITHIN_TAU` is tested only at n_max, at alpha. Both
-   use exact Clopper-Pearson bounds, computed with the Python standard library.
-4. **Grades with exact inheritance**, as described above. A seeded 5% audit
+   ignores the seed, it samples independently and says so; the reference then
+   runs twice on every item. (Under `--criterion harmful_abs`, as in 0.1.0, the
+   verdict then bounds the excess harmful-flip rate over that second run with
+   wider, unpaired bounds.)
+3. **Measures the noise floor.** Under the default and `harmful_excess`
+   criteria, both stacks run the first 64 planned items twice (the probe;
+   `--floor-probe-items`). A stack whose outputs differ between the two runs is
+   noisy. If either stack is noisy, the reference runs twice on every item, and
+   a noisy candidate does too. The floor is the larger of the two stacks'
+   answer-level repeat-flip rates. Second runs repeat the first run's request
+   exactly under greedy decoding; under sampling without verified shared
+   randomness every run gets its own seed, so a repeat pair and a cross-stack
+   pair are comparable when nothing changed.
+4. **Evaluates items sequentially.** Items run in a seeded random order. The plan
+   has looks at n = 32, 64, 128, ... and at n_max. Per capability, `DEVIATES` is
+   tested at every look at alpha/(m K), where m is the number of capabilities and
+   K the number of looks, and the run stops at the first one the power check
+   allows. `EQUIVALENT_WITHIN_TAU` is tested only at n_max, at alpha, and needs
+   every capability within tau. Both use an exact paired bound (a two-sided
+   Clopper-Pearson bound on how often the two runs disagree, combined with a
+   conditional Clopper-Pearson bound on the direction of those disagreements),
+   computed with the Python standard library. Before either verdict, the power
+   check computes the exact chance that the planned items pass when nothing
+   changed, at the measured floor; below `--power` (default 0.9) the verdict is
+   `INCONCLUSIVE_UNDERPOWERED`. `--criterion harmful_abs` keeps the 0.1.0 rule:
+   Clopper-Pearson bounds on the harmful-flip rate at alpha/K and alpha, with no
+   probe and no power check.
+5. **Grades with exact inheritance**, as described above. A seeded 5% audit
    (`--audit-fraction`) re-grades inherited outputs; audit calls are counted as
    overhead.
-5. **Meters cost.** Hard dollar, token and wall-time caps apply. Every request is
+6. **Meters cost.** Hard dollar, token and wall-time caps apply. Every request is
    reserved at its worst case before it is sent, so the run stops at or below the
    cap. A dollar cap needs a price for every endpoint stack.
 
@@ -212,20 +286,34 @@ pass `--sandbox-weak-ok`, which blocks sockets inside Python instead.
 
 ## How to read a verdict
 
-You set two numbers. `--tau` is the largest harmful-flip rate you would accept
-(default 0.01, one percentage point). `--alpha` is the error rate of the verdict
-(default 0.05).
+You set three numbers. `--tau` is the largest change you would accept (default
+0.01, one percentage point) on the criterion's statistic: the net accuracy loss
+per capability (`net_change`, the default), the harmful-flip rate beyond the
+reference's noise floor (`harmful_excess`), or the harmful-flip rate
+(`harmful_abs`). `--alpha` is the error rate of the verdict (default 0.05).
+`--power` is the chance of a pass, when nothing changed, that the plan must have
+(default 0.9).
 
-- `EQUIVALENT_WITHIN_TAU`: the run reached n_max, and the one-sided upper bound
-  on the harmful-flip rate is at most tau. The change is unlikely to flip more
-  than tau of answers from right to wrong on items like those in the bank.
-- `DEVIATES`: at some look, the one-sided lower bound on the harmful-flip rate
-  was above tau. The change likely flips more than tau of answers from right to
-  wrong. See the known limitation above if a stack is flagged as
-  non-deterministic.
-- `INCONCLUSIVE`: neither holds. Usually there were too few items for the
-  chosen tau (with no harmful flips at all you need roughly 300 items for
-  tau = 0.01 at alpha = 0.05), or a cap stopped the run early.
+- `EQUIVALENT_WITHIN_TAU`: the run evaluated every planned item, and for every
+  capability the one-sided upper bound on the statistic is at most tau. Under
+  `net_change`: the candidate is unlikely to be more than tau less accurate than
+  the reference in any capability, on items like those in the bank; inside a
+  capability, helpful flips offset harmful ones.
+- `DEVIATES`: at some look, for some capability, the one-sided lower bound on
+  the statistic was above tau, and the plan had the requested power.
+- `INCONCLUSIVE_UNDERPOWERED`: the planned items are too few for tau at the
+  requested power, given the measured noise floor. This is never a pass or a
+  fail. The report gives the number of items that would do, which capabilities
+  are short, and the smallest tolerance the bank supports. With no noise at all
+  and alpha = 0.05, power 0.9, the default criterion needs 597 items per
+  capability for tau = 0.01, 297 for 0.02 and 117 for 0.05; noise raises these
+  numbers (`inferdrift power`). If the bounds already pointed to a deviation,
+  the report says so as evidence, not as a verdict.
+- `INCONCLUSIVE`: none of these holds, for example a cap stopped the run early,
+  the reference failed on some items, or the bounds straddle tau. Under
+  `harmful_abs` (no power check) this also covers too few items: with no harmful
+  flips at all the 0.1.0 rule needs roughly 300 items for tau = 0.01 at
+  alpha = 0.05.
 
 The verdict is about the items in the bank and the decoding settings you used,
 and the bounds assume the items are independent draws from the distribution the
@@ -233,17 +321,26 @@ bank represents.
 
 Where to look in a run directory:
 
-- `summary.md`: verdict, harmful/helpful flip rates and accuracy change with
-  their bounds, per-suite churn, grading cost, channels, coupling and cost;
-- `report.json`: everything, including `verdict.bound`, `looks` (the bound at
-  each look), `coupling.flags`, `stacks.diff` (profile differences between the
-  stacks) and `limitations` (anything that weakens the result);
+- `summary.md`: verdict and, when underpowered, the items needed; the noise
+  floor; harmful and helpful flips, churn and net change against the floor, with
+  their bounds; the verdict per capability; deterministic mode; per-suite
+  churn, grading cost, channels, coupling and cost;
+- `report.json`: everything, including `verdict.bound` and
+  `verdict.per_capability`, `looks` (the bounds at each look), `noise` (the
+  floor, who ran twice and why), `power`, `deterministic_mode`,
+  `reference_cache`, `coupling.flags`, `stacks.diff` (profile differences between
+  the stacks) and `limitations` (anything that weakens the result). The unpaired
+  `estimates.accuracy_change` is kept from 0.1.0; under the paired criteria the
+  net change is `estimates.net_change`;
 - `items.jsonl`: each item's two outputs, grades and flip (-1 harmful, +1
   helpful, 0 none).
 
 Exit codes: `0` run completed (with `--exit-on-verdict`: `0`
-EQUIVALENT_WITHIN_TAU, `10` DEVIATES, `11` INCONCLUSIVE); `3` refused before any
-work started, with a JSON line naming the bad input; `4` error. Output on stdout
+EQUIVALENT_WITHIN_TAU, `10` DEVIATES, `11` INCONCLUSIVE, `12`
+INCONCLUSIVE_UNDERPOWERED); `3` refused, either before any work started, with a
+JSON line naming the bad input, or during a run whose integrity cannot be kept
+(an engine that silently returns fewer outputs than requested, a corrupt
+reference cache); `4` error. Output on stdout
 is strict JSON. A few environment errors, such as an output path that cannot be
 written, still end with a Python traceback and exit code 1.
 
@@ -260,6 +357,17 @@ written, still end with a Python traceback and exit code 1.
 - Every numeric input has a closed domain and is checked before anything is sent
   or written. Values such as `nan`, `inf` and `1e999` are refused, not coerced.
 
+## Reference cache
+
+`--ref-cache DIR` keeps the reference's outputs and grades, keyed by the
+reference's profile digest and spec, the decode settings and the bank, and
+reuses them for later candidates: a second candidate against the same reference
+sends no reference generation request. A grade is reused only if it was made by
+the same grader (the same judge model and template for judge-graded items).
+Loading is strict, and a damaged entry refuses the run. Two runs writing the
+same entry at once both leave a valid entry; the last one wins. The cache works
+with the default and `harmful_excess` criteria.
+
 ## Tests
 
 ```bash
@@ -268,7 +376,7 @@ python -m pytest
 ```
 
 Installing pytest needs network access. The tests themselves run offline against
-the local stand-in, in about 20 seconds.
+the local stand-in, in about a minute of CPU time.
 
 ## Contributing and security
 
