@@ -180,7 +180,8 @@ def _paired_sections(cfg, records, looks, extra, channels, coupling, profiles) -
         b["basis"] = rep_basis
         est_add[name] = b
     net = _paired_counts([r for r in records if r.get("residual_net") is not None], lambda r: r["residual_net"])
-    est_add["net_change"] = dict(_bound_of(net, alpha), sign="net loss = acc(reference) - acc(candidate)")         if net.n else None
+    est_add["net_change"] = (dict(_bound_of(net, alpha), sign="net loss = acc(reference) - acc(candidate)")
+                             if net.n else None)
     est_add["replicate_items"] = len(rep_items)
     # power
     need = gate.get("items_needed") or {}
@@ -246,9 +247,10 @@ def _paired_sections(cfg, records, looks, extra, channels, coupling, profiles) -
         if rc["lower"] > (rr["point"] or 0.0):
             lim.append("the candidate is noisier than the reference; under harmful_excess the candidate is charged "
                        "for noise beyond the reference's floor")
-    if cfg.criterion == "harmful_excess" and (px.get("routing") or {}).get("candidate_every_item") is False and             px.get("noisy", {}).get("candidate"):
-        lim.append("harmful_excess subtracts the reference's floor only; a noisier candidate is charged for its "
-                   "own noise")
+    if cfg.criterion == "harmful_excess" and ((px.get("noisy") or {}).get("candidate") or
+                                              (px.get("channel_noisy") or {}).get("candidate")):
+        lim.append("harmful_excess subtracts the reference's floor only; a noisy candidate is charged for the part "
+                   "of its own noise beyond that floor")
     return {"criteria": crit_out, "noise": noise_out, "power": power_out, "deterministic_mode": det,
             "estimates_add": est_add}, lim
 

@@ -107,6 +107,13 @@ def test_unmeasured_floor_gives_no_pass_or_fail(tmp_path, standins, fx):
     assert rep["power"]["floor_source"] == "unmeasured" and rep["power"]["items_needed_lower_bound"] == 57
 
 
+def test_stop_if_underpowered_stops_after_the_probe(tmp_path, standins, fx):
+    code, _, rep = run(standins, fx, tmp_path / "stop", fx["det"], fx["det"], ["--stop-if-underpowered",
+                                                                              "--exit-on-verdict"])
+    assert code == 12 and rep["verdict"]["verdict"] == "INCONCLUSIVE_UNDERPOWERED" and rep["verdict"]["n"] == 64
+    assert rep["verdict"]["items_needed"] == 597 and rep["verdict"]["gates"]["stopped_after_probe_underpowered"]
+
+
 def test_declared_deterministic_mode_with_observed_noise_is_flagged(tmp_path, standins, fx, monkeypatch):
     monkeypatch.setitem(determinism.CONFIRMED_SETTINGS, "openai", [
         {"setting": "example-batch-invariance", "how_to_enable": "start the engine with its deterministic option",
