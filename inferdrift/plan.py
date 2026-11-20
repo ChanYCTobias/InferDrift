@@ -109,7 +109,8 @@ class Plan:
         d["rule"] = ("Per capability c (the item's suite), with r = +1 a loss: DEVIATES at look k iff "
                      "LB(theta_c; alpha/(m K)) > tau for some c; EQUIVALENT_WITHIN_TAU iff every planned item was "
                      "evaluated and UB(theta_c; alpha) <= tau for every c; INCONCLUSIVE_UNDERPOWERED when the plan "
-                     "lacks the requested power at the measured floor; otherwise INCONCLUSIVE. Bounds are exact "
+                     "lacks the requested power at the gate's floor (measured, or the supplied --plan-floor unless "
+                     "the run measures a significantly higher one); otherwise INCONCLUSIVE. Bounds are exact "
                      "paired bounds; theta is the net loss (net_change) or the excess harmful-flip rate over the "
                      "replicate floor (harmful_excess).")
         return d

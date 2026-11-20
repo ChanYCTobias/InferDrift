@@ -30,24 +30,29 @@ You choose what the verdict certifies:
   flips offset harmful ones, so this is the "is it worse on balance" question.
 - **`harmful_excess`** bounds the rate of harmful flips beyond the reference's
   own noise floor. Helpful flips do not offset harmful ones.
-- **`harmful_abs`** is the release 0.1.0 rule: it bounds the harmful-flip rate
+- **`harmful_abs`** is the 0.1.0 rule: it bounds the harmful-flip rate
   itself. Use it only for stacks that are deterministic: on a noisy engine it
   counts the engine's own noise as harm.
 
-Each gives one verdict at the tolerance you choose, from exact bounds. If the
-item bank is too small for that tolerance, the verdict says so and states how
-many items would be needed (or, past the search's limit of 20,000 items in the
-largest capability, the size at which the search stopped), instead of a pass or
-a fail.
+Each gives one verdict at the tolerance you choose, from exact bounds (except
+`harmful_abs` under sampled decoding without verified shared randomness; see
+step 2 of "What a run does"). Under the default and `harmful_excess` criteria,
+if the item bank is too small for that tolerance, the verdict says so and states
+how many items would be needed (or, past the search's limit of 20,000 items in
+the largest capability, the size at which the search stopped), instead of a pass
+or a fail.
 
 Grading uses exact inheritance. When the candidate's output is byte-identical to
 the reference output, a deterministic grader would give it the same grade, so
 the grade is reused instead of recomputed. A seeded random share of the reused
-grades is still re-checked. Every reference output is graded once per run, or,
-with the reference cache (`--ref-cache`), once across runs, again with a seeded
-share re-checked. For the candidate, grading cost therefore grows with the
-number of outputs that differ, plus the audit share (by default about 5% of the
-reused grades), not with the full size of the item bank.
+grades is still re-checked. Every reference first-run output is graded once
+per run, or, with the reference cache (`--ref-cache`), once across runs, again
+with a seeded share re-checked. A reference second run taken from the cache is
+graded again on each run (it inherits the first run's grade when the two
+outputs are byte-identical and the grader is deterministic). For the candidate,
+grading cost therefore grows with the number of outputs that differ, plus the
+audit share (by default about 5% of the reused grades), not with the full size
+of the item bank.
 
 ## Status
 
@@ -64,23 +69,27 @@ index; install it from source (see below).
 - **New in 0.2 (not yet validated on a live engine).** In 0.1.0 a noisy engine
   could make a harmless change look harmful: an engine that is not deterministic
   from run to run produces flips of its own, and the verdict counted them as
-  harm. Version 0.2 measures each stack's noise floor, runs the reference twice
-  when that floor is not zero, and changes the default criterion to the net
-  accuracy change per capability (see "How to read a verdict"). It also adds a
-  power check (`INCONCLUSIVE_UNDERPOWERED` with the number of items needed),
+  harm. Version 0.2 measures each stack's noise floor and runs the reference
+  twice on every item when a 64-item probe (or the channel probe) sees a
+  stack's outputs differ between two runs; a low floor can go unseen on 64
+  items, and the report states the floor with the number of items it rests on.
+  It changes the default criterion to the net accuracy change per capability
+  (see "How to read a verdict"). It also adds a power check
+  (`INCONCLUSIVE_UNDERPOWERED` with the number of items needed),
   deterministic-mode reporting, a reference cache and the `inferdrift power`
   command. What is validated so far: all of this is tested offline against the
   local stand-in only, including its emulation of noisy and deterministic
   engines. It has not yet been run against a live vLLM, llama.cpp or SGLang
-  server, or on a GPU. The deterministic-mode advice is generic: it names no
-  engine-specific setting yet. On a deterministic stack, `--criterion
-  harmful_abs` gives the 0.1.0 verdicts.
+  server, with the transformers adapter, or on a GPU. The deterministic-mode
+  advice is generic: it names no engine-specific setting yet. On a
+  deterministic stack, `--criterion harmful_abs` gives the 0.1.0 verdicts.
 - **Experimental: `compare --plan`.** The requalification plan feature
   (`inferdrift/requalify.py`, `inferdrift/plan_audit.py`,
   `inferdrift/plan_stats.py`) did not meet its validation bar. This release
   ships no command that writes a plan, and the plan format may change.
 
-How each adapter has been exercised so far:
+How each adapter has been exercised so far (the live runs were of 0.1.0; no
+0.2 code path has run against a live engine yet):
 
 | adapter | status |
 |---|---|
@@ -157,9 +166,9 @@ inferdrift compare --ref http://127.0.0.1:8099/v1 --cand http://127.0.0.1:8100/v
   --criterion harmful_abs --out demo_abs
 ```
 
-`inferdrift power --tau 0.05` prints the planner's number for one capability
-with no noise (117 items); add `--floor 0.03` for an engine whose answers flip
-on 3% of repeated requests.
+`inferdrift power --tau 0.05` prints the number of items needed for one
+capability with no noise (117 items); add `--floor 0.03` for an engine whose
+answers flip on 3% of repeated requests.
 
 The run directory `demo/` holds `report.json` (the full report), `items.jsonl`
 (one record per item), `events.jsonl` and `summary.md`.
@@ -242,7 +251,9 @@ instead.
    ignores the seed, it samples independently and says so; the reference then
    runs twice on every item. (Under `--criterion harmful_abs`, as in 0.1.0, the
    verdict then bounds the excess harmful-flip rate over that second run with
-   wider, unpaired bounds.)
+   wider, unpaired bounds. When both endpoints honour the seed and run the same
+   sampler, this 0.1.0 construction can be too optimistic, and the report says
+   so; use the default criterion for sampled decoding.)
 3. **Measures the noise floor.** Under the default and `harmful_excess`
    criteria, both stacks run the first 64 planned items twice (the probe;
    `--floor-probe-items`). A stack whose outputs differ between the two runs is
@@ -261,11 +272,16 @@ instead.
    Clopper-Pearson bound on how often the two runs disagree, combined with a
    conditional Clopper-Pearson bound on the direction of those disagreements),
    computed with the Python standard library. Before either verdict, the power
-   check computes the exact chance that the planned items pass when nothing
-   changed, at the measured floor; below `--power` (default 0.9) the verdict is
-   `INCONCLUSIVE_UNDERPOWERED`. `--criterion harmful_abs` keeps the 0.1.0 rule:
-   Clopper-Pearson bounds on the harmful-flip rate at alpha/K and alpha, with no
-   probe and no power check.
+   check computes, under a simple flip model (independent items, one symmetric
+   flip rate per capability at the floor's point estimate), the chance that the
+   planned items pass when nothing changed. It uses the measured floor, or
+   `--plan-floor` when that is given and the run does not measure a
+   significantly higher one; below `--power` (default 0.9) the verdict is
+   `INCONCLUSIVE_UNDERPOWERED`. With `--plan-floor` and `--floor-probe-items 0`,
+   a run in which no item runs twice does not check the supplied floor at all;
+   the gate then rests on that value alone, and the report says so.
+   `--criterion harmful_abs` keeps the 0.1.0 rule: Clopper-Pearson bounds on the
+   harmful-flip rate at alpha/K and alpha, with no probe and no power check.
 5. **Grades with exact inheritance**, as described above. A seeded 5% audit
    (`--audit-fraction`) re-grades inherited outputs; audit calls are counted as
    overhead.
@@ -304,24 +320,25 @@ reference's noise floor (`harmful_excess`), or the harmful-flip rate
 - `DEVIATES`: at some look, for some capability, the one-sided lower bound on
   the statistic was above tau, and the plan had the requested power.
 - `INCONCLUSIVE_UNDERPOWERED`: the planned items are too few for tau at the
-  requested power, given the measured noise floor. This is never a pass or a
-  fail. The report gives the number of items needed, which capabilities are
-  short, and the smallest tolerance the bank supports. The number is searched on
-  what the run tested: when `--max-items` cut the bank, it is a `--max-items`
-  value for the same bank, seed and item order; otherwise it is a bank size in
-  the bank's proportions. It reaches the requested power while one item fewer
-  does not, and every size up to 5% above it (at least 50 and at most 200 sizes)
-  was checked to reach it as well. Exact power is not monotone in the number of
-  items, so larger sizes were not checked. If the search reaches 20,000 items in
-  the largest capability without finding enough, the report gives the size where
-  it stopped and the power there, instead of a number. A capability is short
-  when its own power at its planned count is below `--power`; the report gives
-  the number it needs on its own (what `inferdrift power` gives at its floor),
-  and together with other short capabilities it can need more. With no noise at
-  all and alpha = 0.05, power 0.9, the default criterion needs 597 items per
-  capability for tau = 0.01, 297 for 0.02 and 117 for 0.05; noise raises these
-  numbers (`inferdrift power`). If the bounds already pointed to a deviation,
-  the report says so as evidence, not as a verdict.
+  requested power, given the noise floor (measured, or `--plan-floor` as in step
+  4). This is never a pass or a fail. The report gives the number of items
+  needed, which capabilities are short, and the smallest tolerance the bank
+  supports. The number is searched on what the run tested: when `--max-items`
+  cut the bank, it is a `--max-items` value for the same bank, seed and item
+  order; otherwise it is a bank size in the bank's proportions. It reaches the
+  requested power while one item fewer does not, and every size up to 5% above
+  it (at least 50 and at most 200 sizes) was checked to reach it as well. Exact
+  power is not monotone in the number of items, so larger sizes were not
+  checked. If the search reaches 20,000 items in the largest capability without
+  finding enough, the report gives the size where it stopped and the power
+  there, instead of a number. A capability is short when its own power at its
+  planned count is below `--power`; the report gives the number it needs on its
+  own (what `inferdrift power` gives at its floor); in the joint plan it can
+  need more. With no noise at all and alpha = 0.05, power 0.9, the default
+  criterion needs 597 items per capability for tau = 0.01, 297 for 0.02 and 117
+  for 0.05; noise raises these numbers (`inferdrift power`). If the bounds
+  already pointed to a deviation, the report says so as evidence, not as a
+  verdict.
 - `INCONCLUSIVE`: none of these holds, for example a cap stopped the run early,
   the reference failed on some items, or the bounds straddle tau. Under
   `harmful_abs` (no power check) this also covers too few items: with no harmful
@@ -352,9 +369,10 @@ Exit codes: `0` run completed (with `--exit-on-verdict`: `0`
 EQUIVALENT_WITHIN_TAU, `10` DEVIATES, `11` INCONCLUSIVE, `12`
 INCONCLUSIVE_UNDERPOWERED); `3` refused, either before any work started, with a
 JSON line naming the bad input, or during a run whose integrity cannot be kept
-(an engine that silently returns fewer outputs than requested, a corrupt
-reference cache); `4` error. Output on stdout
-is strict JSON. A few environment errors, such as an output path that cannot be
+(under the default and `harmful_excess` criteria, an engine that silently
+returns fewer outputs than requested; a corrupt reference cache); `4` error.
+Under `harmful_abs` a short return keeps its 0.1.0 handling: the run stops at
+that point and is not refused. Output on stdout is strict JSON. A few environment errors, such as an output path that cannot be
 written, still end with a Python traceback and exit code 1.
 
 ## Safety
@@ -377,9 +395,10 @@ reference's profile digest and spec, the decode settings and the bank, and
 reuses them for later candidates: a second candidate against the same reference
 sends no reference generation request. A grade is reused only if it was made by
 the same grader (the same judge model and template for judge-graded items).
-Loading is strict, and a damaged entry refuses the run. Two runs writing the
-same entry at once both leave a valid entry; the last one wins. The cache works
-with the default and `harmful_excess` criteria.
+Loading is strict: a damaged entry refuses the run. A missing outputs file is
+treated as a miss and rebuilt (`reference_cache.notes` in the report says so).
+Two runs writing the same entry at once both leave a valid entry; the last one
+wins. The cache works with the default and `harmful_excess` criteria.
 
 ## Tests
 
@@ -389,7 +408,7 @@ python -m pytest
 ```
 
 Installing pytest needs network access. The tests themselves run offline against
-the local stand-in, in about a minute of CPU time.
+the local stand-in, in one to two minutes of CPU time.
 
 ## Contributing and security
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """End-to-end comparisons against local stand-in endpoints (127.0.0.1 only, no model, no network).
 
-The release 0.1.0 scenarios run with ``--criterion harmful_abs`` (the 0.1.0 rule); each has a
+The 0.1.0 scenarios run with ``--criterion harmful_abs`` (the 0.1.0 rule); each has a
 counterpart under the default criterion where the behaviour differs."""
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def test_identical_stacks_default_criterion(tmp_path, standins, known):
     line = json.loads(stdout.strip().splitlines()[-1])
     assert rep["verdict"]["verdict"] == "INCONCLUSIVE_UNDERPOWERED" and code == 12
     assert line["items_needed"] == rep["verdict"]["items_needed"] == 3 * 597  # 597 per capability, zero floor
-    assert line["floor"] == {"value": 0.0, "source": "measured"}
+    assert line["floor"] == {"value": 0.0, "source": "measured", "measured": 0.0}
     assert rep["noise"]["floor"]["items"] == {"reference": 64, "candidate": 64}
     code, _, rep2 = compare(pa, pb, bank, tmp_path / "pass", ["--tau", "0.1", "--exit-on-verdict"])
     assert rep2["verdict"]["verdict"] == "EQUIVALENT_WITHIN_TAU" and code == 0

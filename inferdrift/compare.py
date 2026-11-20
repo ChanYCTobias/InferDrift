@@ -7,7 +7,7 @@ the power of the plan, meter the cost, and write the report.
 
 Criteria (``criteria.py``): ``net_change`` (default) and ``harmful_excess`` use
 the exact paired bound per capability; ``harmful_abs`` is the 0.1.0 rule and runs
-the 0.1.0 loop unchanged (``_loop_harmful_abs``).
+the 0.1.0 loop unchanged (inline in ``run_compare``).
 
 Run protocol of the paired criteria, per chunk of the seeded order: the
 reference's first run R1 and the candidate's first run C1 in forward order, then
@@ -1047,7 +1047,9 @@ def evaluate_gate(cfg, records: list[dict], planned_caps: Counter, bank_caps: Co
     p_planned = pw.power_total(planned, {c: models[c] for c in planned}, alpha, tau)
     per_cap_power = {c: pw.pass_probability(planned[c], models[c], alpha, tau) for c in planned}
     underpowered = source == "unmeasured" or p_planned < target
+    gate_floor = cfg.plan_floor if source == "supplied" else (fl["value"] if source == "measured" else 0.0)
     out = {"floor_source": source, "floors": floors, "supplied_floor_contradicted": contradicted,
+           "floor_value": gate_floor,
            "power_at_planned": p_planned, "power_per_capability": per_cap_power, "underpowered": underpowered,
            "floor": fl, "stats": {"reference": st_r, "candidate": st_c}}
     if not final:

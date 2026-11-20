@@ -162,7 +162,7 @@ def delta_lower(a: int, b: int, n: int, lv: tuple[float, float, float, float]) -
     D = a + b
     r_lo = nm.cp_lower(a, D, rest, log_r)
     slope = 2.0 * r_lo - 1.0
-    if slope >= 0.0:  # only pi_L is used (the library computes both; the value is the same)
+    if slope >= 0.0:  # only pi_L is used (computing only the side that is used gives the same value)
         return max(-1.0, slope * nm.cp_lower(D, n, g_half, log_g))
     return max(-1.0, slope * nm.cp_upper(D, n, g_half, log_g))
 

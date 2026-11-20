@@ -447,7 +447,9 @@ def build_report(*, cfg, state, plan, stats, records, looks, verdict, bound, fir
             "pre_gate_deviation": px.get("pre_gate_deviation"),
             "gates": {"underpowered": gate.get("underpowered"), "power_at_planned": gate.get("power_at_planned"),
                       "power_requested": cfg.power, "floor_source": gate.get("floor_source"),
-                      "floor": (gate.get("floor") or {}).get("value"),
+                      "floor": gate.get("floor_value"),
+                      "measured_floor": (gate.get("floor") or {}).get("value")
+                      if (gate.get("floor") or {}).get("measured") else None,
                       "deviates_look": px.get("deviates_look"), "all_within_tau": fin.get("all_within"),
                       "every_planned_item_evaluated": px.get("complete"),
                       "stopped_after_probe_underpowered": px.get("stopped_underpowered")}})

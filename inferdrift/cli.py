@@ -5,8 +5,8 @@
 Exit codes: 0 run completed (the verdict is in the report; with ``--exit-on-verdict``
 0 means EQUIVALENT_WITHIN_TAU, 10 DEVIATES, 11 INCONCLUSIVE, 12
 INCONCLUSIVE_UNDERPOWERED), 3 refused (before any work started, or during a run
-when its integrity cannot be kept: a missing second run, a corrupt reference
-cache), 4 error.
+when its integrity cannot be kept: under the default and harmful_excess criteria
+a missing second run or a short return, and a corrupt reference cache), 4 error.
 
 Every numeric option is read with a strict grammar and checked against its closed
 domain before anything is sent or written: caps and durations are
@@ -188,7 +188,8 @@ def _cmd_compare_body(a, plan) -> int:
             "stopped_by": rep["cost"]["stopped_by"], "report": str(Path(a.out) / "report.json"),
             "criterion": v.get("criterion"), "items_needed": v.get("items_needed"),
             "items_needed_note": v.get("items_needed_note"),
-            "floor": {"value": gates.get("floor"), "source": gates.get("floor_source")} if gates else None,
+            "floor": {"value": gates.get("floor"), "source": gates.get("floor_source"),
+                      "measured": gates.get("measured_floor")} if gates else None,
             "pre_gate_deviation": v.get("pre_gate_deviation")}
     if plan is not None and rep["status"] == "completed":
         from .jsonio import read_jsonl_strict, write_json
@@ -461,13 +462,15 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--exit-on-verdict", action="store_true")
     c.add_argument("--criterion", choices=("net_change", "harmful_excess", "harmful_abs"), default=None,
                    help="what the verdict certifies (default net_change; harmful_abs under --plan): net_change = "
-                   "net accuracy loss per capability against the noise floor; harmful_excess = excess harmful-flip "
+                   "net accuracy loss per capability (the noise floor sets the power check); harmful_excess = excess "
+                   "harmful-flip "
                    "rate over the reference's replicate floor; harmful_abs = the 0.1.0 rule, for deterministic stacks")
     c.add_argument("--power", default="0.9", help="power the plan must have, in (0, 1); below it the verdict is "
                    "INCONCLUSIVE_UNDERPOWERED with the number of items needed, or, when the search passes 20000 "
                    "items in the largest capability, the size where it stopped")
     c.add_argument("--floor-probe-items", default=None, help="items run twice on both stacks to measure the noise "
-                   "floor (default 64; 0 turns the probe off)")
+                   "floor (default 64 under net_change and harmful_excess; 0 turns the probe off; not used by "
+                   "harmful_abs)")
     c.add_argument("--plan-floor", default=None, help="a floor in [0, 1] measured beforehand, used by the power gate "
                    "unless this run measures a significantly higher one")
     c.add_argument("--replicate", choices=("auto", "always"), default="auto",

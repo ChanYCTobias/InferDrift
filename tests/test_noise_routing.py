@@ -1,6 +1,6 @@
 # Copyright 2026 The InferDrift Authors
 # SPDX-License-Identifier: Apache-2.0
-"""Noise routing, the power gate and the planted-wrong cases, against stand-ins that emulate
+"""Noise routing, the power gate and the known-wrong cases, against stand-ins that emulate
 deterministic and noisy engines (127.0.0.1 only, no model, no network)."""
 
 from __future__ import annotations
@@ -134,7 +134,7 @@ def test_declared_deterministic_mode_with_observed_noise_is_flagged(tmp_path, st
     assert any("declares a deterministic mode" in x for x in rep["limitations"])
 
 
-# ------------------------------------------------------------------ planted: a byte-identical candidate never DEVIATES
+# ------------------------------------------------------------------ known-wrong case: a byte-identical candidate never DEVIATES
 @pytest.mark.parametrize("criterion", CRITERIA)
 def test_identical_deterministic_candidate_never_deviates(tmp_path, standins, fx, criterion):
     _, _, rep = run(standins, fx, tmp_path / criterion, fx["det"], fx["det"], ["--tau", "0.05", "--criterion", criterion])
@@ -176,7 +176,7 @@ def test_independent_noisy_engines_do_not_deviate_but_the_010_rule_does(tmp_path
         assert rep["verdict"]["verdict"] == "DEVIATES", criterion
 
 
-# ------------------------------------------------------------------ planted: one item short of the planner's number
+# ------------------------------------------------------------------ known-wrong case: one item short of the number needed
 def test_bank_one_item_short_is_underpowered(tmp_path, standins, fx):
     n_star = pw.items_needed({"t_one": 1}, {"t_one": pw.net_change_model(0.0)}, 0.05, 0.05, 0.9)["items_needed"]
     assert n_star == 117
@@ -206,6 +206,7 @@ def test_bank_one_item_short_at_a_supplied_noisy_floor(tmp_path, standins, fx):
             assert line["verdict"] == "INCONCLUSIVE_UNDERPOWERED" and line["items_needed"] == n_star
         else:
             assert line["verdict"] != "INCONCLUSIVE_UNDERPOWERED" and line["floor"]["source"] == "supplied"
+            assert line["floor"]["value"] == 0.2
 
 
 # ------------------------------------------------------------------ the items needed: a number a rerun can use
@@ -225,6 +226,7 @@ def test_a_bank_just_above_the_first_powered_size_gets_a_number_that_passes(tmp_
                               "--plan-floor", "0.02", "--out", tmp_path / f"o{n}"])
         line = json.loads(stdout.strip().splitlines()[-1])
         assert line["verdict"] == expect, n
+        assert line["floor"] == {"value": 0.02, "source": "supplied", "measured": 0.0}  # the floor the gate used
         if n == 683:
             assert line["items_needed"] == n_power and "every size from 692 to 742 was checked" in line[
                 "items_needed_note"]
@@ -368,7 +370,7 @@ def test_channel_probe_errors_alone_route_nothing_and_say_so(tmp_path, standins,
     assert rep["noise"]["routing"]["candidate_every_item"] is False
 
 
-# ------------------------------------------------------------------ planted: a replicate silently skipped is refused
+# ------------------------------------------------------------------ known-wrong case: a replicate silently skipped is refused
 class _DropOne:
     """Wraps an adapter; on the ``nth`` generate call returns one output fewer, without raising."""
 
@@ -442,7 +444,7 @@ class _ErrorsFor:
         out = self.inner.generate(reqs, meter)
         if self.only_call is not None and self.calls not in self.only_call:
             return out
-        return [GenResult(r.item_id, "", "error", None, None, "estimated_worst_case", error="planted error")
+        return [GenResult(r.item_id, "", "error", None, None, "estimated_worst_case", error="injected error")
                 if r.item_id in self.ids else r for r in out]
 
     def __getattr__(self, name):

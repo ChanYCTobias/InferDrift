@@ -20,11 +20,12 @@ the bank reuses it.
 
 Loading is strict: a mismatch between ``meta.json`` and the outputs file, a
 duplicate line, a line for an item whose content changed, or any malformed
-value refuses the run (``CACHE_CORRUPT``, exit 3); a cache that claims outputs
-it does not hold is refused, never silently regenerated.  A missing entry is a
-miss.  When the outputs file named by ``meta.json`` is missing (a concurrent
-writer replaced it), ``meta.json`` is read once more, and if the file is still
-missing the entry is treated as a miss.  Two concurrent writers: the last
+value refuses the run (``CACHE_CORRUPT``, exit 3); an outputs file that does
+not match ``meta.json`` is refused, never silently regenerated.  A missing entry
+is a miss.  When the outputs file named by ``meta.json`` is missing (for
+example, a concurrent writer replaced it; a deleted file looks the same),
+``meta.json`` is read once more, and if the file is still missing the entry is
+treated as a miss, rebuilt, and noted in the report.  Two concurrent writers: the last
 ``meta.json`` wins, and both leave a valid entry.
 
 Grades are inherited only when the grader identity matches; otherwise the
