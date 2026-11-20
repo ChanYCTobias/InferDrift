@@ -1,0 +1,12 @@
+{
+ "name": "chat_template_bug",
+ "change_class": "chat_template_bug",
+ "description": "The candidate serves the same model with a cut-down copy of the Qwen3 chat template that never renders tool definitions (qwen3_chatml_drops_tools.jinja); prompts without tools render byte-identically.",
+ "model": {"repo": "Qwen/Qwen3-0.6B", "commit": "c1899de289a04d12100db370d81485cdf75e47ca"},
+ "reference": "hf:Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca?attn=sdpa&dtype=float32",
+ "candidate": "hf:Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca?attn=sdpa&dtype=float32&template={scenarios}/qwen3_chatml_drops_tools.jinja",
+ "bank": "core",
+ "tau": 0.01,
+ "alpha": 0.05,
+ "decode": "greedy"
+}

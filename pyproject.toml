@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inferdrift"
+version = "0.1.0.dev0"
+description = "Coupled differential evaluation of two LLM inference stacks with exact grade inheritance and flip-rate bounds"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "The InferDrift Authors" }]
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChanYCTobias/InferDrift"
+Source = "https://github.com/ChanYCTobias/InferDrift"
+Issues = "https://github.com/ChanYCTobias/InferDrift/issues"
+
+[project.optional-dependencies]
+# The reference adapter needs PyTorch.  Install the CPU wheel first, for example
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# so that this extra does not pull a CUDA build.
+hf = [
+    "torch>=2.1",
+    "transformers>=4.51",
+    "tokenizers>=0.20",
+    "safetensors>=0.4",
+    "huggingface_hub>=0.25",
+    "jinja2>=3.1",
+]
+
+[project.scripts]
+inferdrift = "inferdrift.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["inferdrift", "inferdrift.*"]
+
+[tool.setuptools.package-data]
+"inferdrift.banks" = ["items/*.jsonl"]
+"inferdrift.scenarios" = ["*.json", "*.jinja"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

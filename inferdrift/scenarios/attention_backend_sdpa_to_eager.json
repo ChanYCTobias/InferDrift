@@ -1,0 +1,12 @@
+{
+ "name": "attention_backend_sdpa_to_eager",
+ "change_class": "attention_backend",
+ "description": "The attention backend changes from PyTorch SDPA to the eager implementation; model, weights (fp32 on CPU), tokenizer, template and decoding are unchanged.",
+ "model": {"repo": "Qwen/Qwen3-0.6B", "commit": "c1899de289a04d12100db370d81485cdf75e47ca"},
+ "reference": "hf:Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca?attn=sdpa&dtype=float32",
+ "candidate": "hf:Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca?attn=eager&dtype=float32",
+ "bank": "core",
+ "tau": 0.01,
+ "alpha": 0.05,
+ "decode": "greedy"
+}

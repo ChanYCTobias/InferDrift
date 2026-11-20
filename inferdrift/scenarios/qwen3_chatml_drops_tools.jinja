@@ -1,0 +1,18 @@
+{#- Scenario fixture: a ChatML template with a bug, cut down from the Qwen3 chat
+    template of Qwen/Qwen3-0.6B on Hugging Face (Apache-2.0 per the model card;
+    verify before a release).  It renders system, user and assistant turns and the
+    non-thinking generation prompt exactly as the model's own template does, but it
+    never renders the `tools` argument, so the model is asked to call functions it
+    was never shown.  Prompts without tools are byte-identical to the reference
+    rendering.  Changed from that template: only the line that renders an ordinary
+    turn (now used for every role) and the generation prompt are kept; everything
+    else, including the rendering of tools, was removed. -#}
+{%- for message in messages %}
+    {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+    {%- if enable_thinking is defined and enable_thinking is false %}
+        {{- '<think>\n\n</think>\n\n' }}
+    {%- endif %}
+{%- endif %}

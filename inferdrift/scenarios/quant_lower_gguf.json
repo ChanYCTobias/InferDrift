@@ -1,0 +1,16 @@
+{
+ "name": "quant_lower_gguf",
+ "change_class": "quantization",
+ "description": "The candidate llama.cpp server loads a lower GGUF quantization level of the same model than the reference llama.cpp server (Q8_0 to Q4_0, 4-bit weights); engine build, prompts (rendered client-side with the model's own template and sent as token ids) and greedy decoding are unchanged.",
+ "model": {"repo": "Qwen/Qwen3-0.6B", "commit": "c1899de289a04d12100db370d81485cdf75e47ca"},
+ "gguf": {"repo": "unsloth/Qwen3-0.6B-GGUF", "commit": "50968a4468ef4233ed78cd7c3de230dd1d61a56b",
+          "reference_file": "Qwen3-0.6B-Q8_0.gguf", "candidate_file": "Qwen3-0.6B-Q4_0.gguf"},
+ "engine": {"name": "llama.cpp llama-server", "tag": "b11640", "commit": "3e390af18de1131dda27913c00511725b4274c8a",
+            "server_args": ["--threads", "8", "--parallel", "1", "--ctx-size", "4096", "--jinja"]},
+ "reference": "http://127.0.0.1:{ref_port}?dialect=llamacpp&mode=raw&tokenizer=hf:Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca",
+ "candidate": "http://127.0.0.1:{cand_port}?dialect=llamacpp&mode=raw&tokenizer=hf:Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca",
+ "bank": "core",
+ "tau": 0.01,
+ "alpha": 0.05,
+ "decode": "greedy"
+}
